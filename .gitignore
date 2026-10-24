@@ -1,0 +1,7 @@
+.venv/
+data/cache/
+data/baseball/parts/
+data/baseball/zone_parts/
+notes.json
+__pycache__/
+*.pyc

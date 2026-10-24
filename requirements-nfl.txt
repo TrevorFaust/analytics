@@ -1,0 +1,5 @@
+# Install after requirements.txt. --no-deps keeps nfl_data_py from
+# replacing pandas 2.2 with pandas 1, which has no Python 3.12 wheel.
+--no-deps
+nfl_data_py==0.3.3
+nba_api==1.11.4

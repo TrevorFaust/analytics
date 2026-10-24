@@ -1,0 +1,4 @@
+# These are already in requirements.txt. This file remains so an
+# older local install command still works.
+pybaseball==2.2.7
+scikit-learn==1.9.1
