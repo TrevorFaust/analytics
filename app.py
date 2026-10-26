@@ -3516,7 +3516,7 @@ def index_html() -> str:
         )
     return (
         '<div class="index">'
-        '<p class="back"><a href="https://trevorfaust.github.io">Home</a></p>'
+        '<p class="back"><a href="https://trevorfaust.github.io/" target="_top">Home</a></p>'
         '<header class="mast">'
         '<p class="kicker">Trevor Faust</p>'
         "<h1>Analytics</h1>"
@@ -3524,7 +3524,7 @@ def index_html() -> str:
         "Open a subject to see the projects in it.</p>"
         "</header>"
         f'<div class="subjects">{"".join(subjects)}</div>'
-        '<p class="colophon"><a href="https://trevorfaust.github.io">trevorfaust.github.io</a></p>'
+        '<p class="colophon"><a href="https://trevorfaust.github.io/" target="_top">trevorfaust.github.io</a></p>'
         "</div>"
     )
 
