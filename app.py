@@ -3534,7 +3534,12 @@ def index_page() -> None:
 
 
 def boot() -> None:
-    st.set_page_config(page_title="Analytics", layout="wide", initial_sidebar_state="collapsed")
+    st.set_page_config(
+        page_title="Analytics",
+        page_icon="favicon.png",
+        layout="wide",
+        initial_sidebar_state="collapsed",
+    )
     st.markdown(PAGE_STYLE, unsafe_allow_html=True)
     pages = [st.Page(index_page, title="Analytics", default=True)]
     for section in CATALOG:
