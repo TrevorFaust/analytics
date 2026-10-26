@@ -3516,6 +3516,7 @@ def index_html() -> str:
         )
     return (
         '<div class="index">'
+        '<p class="back"><a href="https://trevorfaust.github.io">Home</a></p>'
         '<header class="mast">'
         '<p class="kicker">Trevor Faust</p>'
         "<h1>Analytics</h1>"
