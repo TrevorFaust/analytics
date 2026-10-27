@@ -12,6 +12,7 @@ data/baseball/statcast_bip.parquet, which the baseball page reads.
 
 from __future__ import annotations
 
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -24,7 +25,12 @@ PARTS = ROOT / "data" / "baseball" / "parts"
 OUT = ROOT / "data" / "baseball" / "statcast_bip.parquet"
 
 # Regular season only. Spring training and the postseason stay out.
+# 2020 was the short season. 2022 opened late after the lockout.
 SEASONS = (
+    (date(2020, 7, 23), date(2020, 9, 27)),
+    (date(2021, 4, 1), date(2021, 10, 3)),
+    (date(2022, 4, 7), date(2022, 10, 5)),
+    (date(2023, 3, 30), date(2023, 10, 1)),
     (date(2024, 3, 28), date(2024, 9, 30)),
     (date(2025, 3, 27), date(2025, 9, 29)),
 )
@@ -122,12 +128,41 @@ def download() -> Path:
                 print(f"keep {path.name}", flush=True)
                 continue
             print(f"pull {month_start} to {month_end}", flush=True)
-            raw = statcast(str(month_start), str(month_end), verbose=False, parallel=True)
+            raw = None
+            last_error = None
+            for attempt in range(3):
+                try:
+                    raw = statcast(str(month_start), str(month_end), verbose=False, parallel=attempt < 2)
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    print(f"  retry {attempt + 1} for {path.name}: {exc.__class__.__name__}", flush=True)
+                    time.sleep(8)
+            if raw is None:
+                raise last_error
             balls = balls_in_play(raw)
             balls.to_parquet(path, index=False)
             print(f"  {len(balls):,} balls -> {path.name}", flush=True)
-            combine()
-    return OUT
+    return combine()
+
+
+def _reattach_zone(frame: pandas.DataFrame) -> pandas.DataFrame:
+    """Month files omit plate location. Keep the columns already stored on the combined parquet."""
+    zone_cols = ["plate_x", "plate_z", "sz_top", "sz_bot"]
+    keys = ["game_pk", "at_bat_number", "pitch_number"]
+    if not OUT.exists() or any(name not in frame.columns for name in keys):
+        return frame
+    try:
+        old = pandas.read_parquet(OUT, columns=[*keys, *zone_cols])
+    except Exception:
+        return frame
+    old = old.dropna(subset=["plate_x"])
+    for key in keys:
+        frame[key] = pandas.to_numeric(frame[key], errors="coerce")
+        old[key] = pandas.to_numeric(old[key], errors="coerce")
+    old = old.dropna(subset=keys).drop_duplicates(keys)
+    frame = frame.drop(columns=[name for name in zone_cols if name in frame.columns])
+    return frame.merge(old, on=keys, how="left")
 
 
 def combine() -> Path:
@@ -140,6 +175,7 @@ def combine() -> Path:
         frame = frame.drop_duplicates(keys)
     frame["game_date"] = pandas.to_datetime(frame["game_date"])
     frame["season"] = frame["game_date"].dt.year.astype(int)
+    frame = _reattach_zone(frame)
     OUT.parent.mkdir(parents=True, exist_ok=True)
     frame.to_parquet(OUT, index=False)
     seasons = ", ".join(str(year) for year in sorted(frame["season"].unique()))
