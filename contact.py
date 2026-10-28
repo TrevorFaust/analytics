@@ -157,6 +157,10 @@ class ContactStudy:
     zone_bot: float
     league_woba: float
     league_hits: float
+    miss_bands: pandas.DataFrame
+    miss_facts: pandas.Series
+    hard_prior: float
+    hard_now: float
 
 
 def _batter_names(batters: pandas.Series) -> pandas.Series:
@@ -208,14 +212,57 @@ def _mae(predicted: numpy.ndarray, actual: numpy.ndarray) -> float:
     return float(numpy.mean(numpy.abs(predicted - actual)))
 
 
+def _miss_report(
+    guess: numpy.ndarray, actual: numpy.ndarray, events: pandas.Series
+) -> tuple[pandas.DataFrame, pandas.Series]:
+    """How large each 2025 miss was, and what a call near 1.3 actually became."""
+    miss = numpy.abs(guess - actual)
+    bands = pandas.cut(
+        miss,
+        [0, 0.2, 0.5, 1.0, numpy.inf],
+        labels=["Under 0.2", "0.2 to 0.5", "0.5 to 1", "Over 1"],
+        right=False,
+    )
+    frame = pandas.DataFrame({"band": bands, "miss": miss})
+    total = float(frame["miss"].sum())
+    grouped = frame.groupby("band", observed=False).agg(balls=("miss", "size"), average=("miss", "mean"))
+    grouped["share"] = grouped["balls"] / grouped["balls"].sum()
+    grouped["error_share"] = grouped["average"] * grouped["balls"] / total
+    grouped = grouped.reset_index()
+    hard = (guess >= 1.2) & (guess < 1.4)
+    caught = (guess >= 1.0) & (actual == 0)
+    event = events.astype(str).to_numpy()
+    def _rate(name: str) -> float:
+        return float((event[hard] == name).mean()) if hard.any() else float("nan")
+
+    facts = pandas.Series(
+        {
+            "hard_n": int(hard.sum()),
+            "hard_guess": float(guess[hard].mean()) if hard.any() else float("nan"),
+            "hard_stamp": float(actual[hard].mean()) if hard.any() else float("nan"),
+            "hard_hr": _rate("home_run"),
+            "hard_out": float((actual[hard] == 0).mean()) if hard.any() else float("nan"),
+            "hard_double": _rate("double"),
+            "caught_n": int(caught.sum()),
+            "caught_guess": float(guess[caught].mean()) if caught.any() else float("nan"),
+        }
+    )
+    return grouped, facts
+
+
 def _calibration(predicted: numpy.ndarray, actual: numpy.ndarray, source: str) -> pandas.DataFrame:
-    frame = pandas.DataFrame({"predicted": predicted, "actual": actual})
-    frame["bin"] = pandas.qcut(frame["predicted"], 10, duplicates="drop")
+    """Group calls in steps of 0.1. Hold anything under an out at 0 and anything over a home run at 2."""
+    frame = pandas.DataFrame({"predicted": numpy.clip(predicted, 0, 2), "actual": actual})
+    edges = numpy.round(numpy.arange(0, 2.0 + 1e-9, 0.1), 10)
+    frame["bin"] = pandas.cut(frame["predicted"], edges, include_lowest=True)
     grouped = (
         frame.groupby("bin", observed=True)
         .agg(predicted=("predicted", "mean"), actual=("actual", "mean"), balls=("actual", "size"))
-        .reset_index(drop=True)
+        .reset_index()
     )
+    grouped = grouped.loc[grouped["balls"].ge(50)].copy()
+    grouped["band"] = grouped["bin"].map(lambda interval: round(float(interval.left), 1)).astype(float)
+    grouped = grouped.drop(columns=["bin"]).reset_index(drop=True)
     grouped["source"] = source
     return grouped
 
@@ -254,6 +301,11 @@ def fit_study(balls: pandas.DataFrame) -> ContactStudy:
     bin_pred = _bin_predictions(train, test)
     savant = test["estimated_woba_using_speedangle"].to_numpy()
     actual = test["woba_value"].to_numpy()
+    miss_bands, miss_facts = _miss_report(model_pred, actual, test["events"])
+    barrel = train["launch_speed"].ge(100) & train["launch_angle"].between(20, 35)
+    barrel_now = test["launch_speed"].ge(100) & test["launch_angle"].between(20, 35)
+    hard_prior = float(train.loc[barrel, "woba_value"].mean()) if bool(barrel.any()) else float("nan")
+    hard_now = float(test.loc[barrel_now, "woba_value"].mean()) if bool(barrel_now.any()) else float("nan")
 
     speeds = numpy.arange(60, 116, 2)
     angles = numpy.arange(-20, 56, 2)
@@ -299,11 +351,13 @@ def fit_study(balls: pandas.DataFrame) -> ContactStudy:
     calibration = pandas.concat(
         [
             _calibration(model_pred, actual, "This model"),
-            _calibration(savant, actual, "Savant"),
-            _calibration(bin_pred, actual, "5-by-5 grid"),
+            _calibration(savant, actual, "MLB expected"),
         ],
         ignore_index=True,
     )
+    shared = set(calibration.loc[calibration["source"].eq("This model"), "band"])
+    shared &= set(calibration.loc[calibration["source"].eq("MLB expected"), "band"])
+    calibration = calibration.loc[calibration["band"].isin(shared)].reset_index(drop=True)
     return ContactStudy(
         train_label=train_label,
         test_label=test_label,
@@ -336,6 +390,10 @@ def fit_study(balls: pandas.DataFrame) -> ContactStudy:
         zone_bot=zone_bot,
         league_woba=league_woba,
         league_hits=league_hits,
+        miss_bands=miss_bands,
+        miss_facts=miss_facts,
+        hard_prior=hard_prior,
+        hard_now=hard_now,
     )
 
 
@@ -486,38 +544,66 @@ def surface_figure(surface: pandas.DataFrame) -> go.Figure:
 
 
 def calibration_figure(calibration: pandas.DataFrame) -> go.Figure:
-    colors = {"This model": "#e6b325", "Savant": "#8eb8c4", "5-by-5 grid": "#d08c60"}
+    """The vertical axis is the miss. Zero means the results matched the guess."""
+    colors = {"This model": "#e6b325", "MLB expected": "#8eb8c4"}
     figure = go.Figure()
-    ceiling = float(calibration[["predicted", "actual"]].max().max())
-    floor = float(calibration[["predicted", "actual"]].min().min())
     figure.add_trace(
         go.Scatter(
-            x=[floor, ceiling],
-            y=[floor, ceiling],
+            x=[-0.08, 2.12],
+            y=[0, 0],
             mode="lines",
-            name="Called it",
+            name="Matched the call",
             line=dict(color="#b7b2a4", width=1, dash="dot"),
             hoverinfo="skip",
         )
     )
+    gaps = calibration["actual"] - calibration["predicted"]
+    gap_pad = max(float(gaps.max() - gaps.min()) * 0.18, 0.02)
+    biggest = float(calibration["balls"].max())
     for source, color in colors.items():
-        group = calibration.loc[calibration["source"].eq(source)]
+        group = calibration.loc[calibration["source"].eq(source)].sort_values("predicted")
+        gap = group["actual"] - group["predicted"]
+        dot = 7 + 15 * numpy.sqrt(group["balls"].to_numpy(dtype=float) / biggest)
         figure.add_trace(
             go.Scatter(
-                x=group["predicted"],
-                y=group["actual"],
+                x=group["band"].astype(float) + 0.05,
+                y=gap,
+                customdata=numpy.column_stack(
+                    [group["actual"].to_numpy(), group["balls"].to_numpy(), group["predicted"].to_numpy()]
+                ),
                 mode="lines+markers",
                 name=source,
                 line=dict(color=color, width=2),
-                marker=dict(size=7),
-                hovertemplate=f"{source}<br>Predicted %{{x:.3f}}<br>Results %{{y:.3f}}<extra></extra>",
+                marker=dict(size=dot, color=color),
+                hovertemplate=(
+                    f"{source}<br>Band %{{x:.2f}}"
+                    "<br>Average call %{customdata[2]:.3f}"
+                    "<br>Results %{customdata[0]:.3f}"
+                    "<br>Gap %{y:+.3f}"
+                    "<br>%{customdata[1]:,.0f} balls<extra></extra>"
+                ),
             )
         )
-    layout = chart_layout(460)
-    layout["margin"] = dict(l=56, r=24, t=40, b=48)
+    layout = chart_layout(420)
+    layout["margin"] = dict(l=64, r=24, t=56, b=64)
     figure.update_layout(**layout)
-    figure.update_xaxes(title="Predicted wOBA weight", tickfont=dict(color="#d9d3c5"), gridcolor="#3a4150")
-    figure.update_yaxes(title="Actual wOBA weight", tickfont=dict(color="#d9d3c5"), gridcolor="#3a4150")
+    figure.update_xaxes(
+        title="Expected wOBA",
+        range=[-0.08, 2.12],
+        tickmode="array",
+        tickvals=[0, 0.9, 1.25, 1.6, 2.0],
+        ticktext=["0 out", "0.9 single", "1.25 double", "1.6 triple", "2 home run"],
+        tickfont=dict(color="#d9d3c5"),
+        gridcolor="#3a4150",
+    )
+    figure.update_yaxes(
+        title="Result minus expected wOBA",
+        range=[float(gaps.min()) - gap_pad, float(gaps.max()) + gap_pad],
+        tickformat="+.2f",
+        zeroline=False,
+        tickfont=dict(color="#d9d3c5"),
+        gridcolor="#3a4150",
+    )
     return figure
 
 
@@ -731,7 +817,7 @@ def _hitter_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
     )
     template = (
         "%{text}<br>%{customdata[3]}<br>This model %{x:.3f}<br>Results %{y:.3f}"
-        "<br>Savant %{customdata[0]:.3f}<br>Gap %{customdata[2]:+.3f}"
+        "<br>MLB expected %{customdata[0]:.3f}<br>Gap %{customdata[2]:+.3f}"
         "<br>Hits per ball %{customdata[4]:.3f}"
         "<br>%{customdata[5]:.0f} singles, %{customdata[6]:.0f} doubles, %{customdata[7]:.0f} triples, %{customdata[8]:.0f} HR"
         "<br>%{customdata[1]:.0f} balls<extra></extra>"
@@ -972,7 +1058,7 @@ def _quadrant_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
         "<br>Results minus model %{x:+.3f}"
         "<br>Hits per ball vs league %{y:+.3f}"
         "<br>Hits per ball %{customdata[5]:.3f}"
-        "<br>Results %{customdata[2]:.3f}<br>This model %{customdata[3]:.3f}<br>Savant %{customdata[4]:.3f}"
+        "<br>Results %{customdata[2]:.3f}<br>This model %{customdata[3]:.3f}<br>MLB expected %{customdata[4]:.3f}"
         "<br>%{customdata[6]:.0f} singles, %{customdata[7]:.0f} doubles, %{customdata[8]:.0f} triples, %{customdata[9]:.0f} HR"
         "<br>%{customdata[1]:.0f} balls<extra></extra>"
     )
@@ -1031,27 +1117,38 @@ def contact_corners(hitters: pandas.DataFrame, club: str | None, league_hits: fl
     )
 
 
-def _dirt_shape() -> dict:
-    """Skinned infield: a 95-foot arc centered on the mound, closed back to home plate."""
-    mound = 60.5
-    radius = 95.0
-    phi = numpy.linspace(-numpy.pi, numpy.pi, 361)
-    xs = radius * numpy.sin(phi)
-    ys = mound + radius * numpy.cos(phi)
-    fair = ys >= numpy.abs(xs)
-    order = numpy.argsort(xs[fair])
-    arc_x = xs[fair][order]
-    arc_y = ys[fair][order]
-    steps = [f"M 0,0 L {arc_x[0]:.2f},{arc_y[0]:.2f}"]
-    steps.extend(f"L {x:.2f},{y:.2f}" for x, y in zip(arc_x[1:], arc_y[1:]))
+_DIRT = "#a07d55"
+_GRASS = "#17352a"
+
+
+def _closed_path(points: list[tuple[float, float]]) -> str:
+    head, *rest = points
+    steps = [f"M {head[0]:.2f},{head[1]:.2f}"]
+    steps.extend(f"L {x:.2f},{y:.2f}" for x, y in rest)
     steps.append("Z")
-    return dict(
-        type="path",
-        path=" ".join(steps),
-        fillcolor="#7a5a3c",
-        line=dict(width=0),
-        layer="below",
-    )
+    return " ".join(steps)
+
+
+def _lane(start: tuple[float, float], end: tuple[float, float], half_width: float) -> str:
+    """A dirt strip between two bases. The infield inside it stays grass."""
+    x0, y0 = start
+    x1, y1 = end
+    dx, dy = x1 - x0, y1 - y0
+    length = float(numpy.hypot(dx, dy))
+    px, py = -dy / length * half_width, dx / length * half_width
+    return _closed_path([(x0 + px, y0 + py), (x1 + px, y1 + py), (x1 - px, y1 - py), (x0 - px, y0 - py)])
+
+
+def _arc_band(inner: float, outer: float) -> str:
+    """Warning track: a dirt band along the outfield arc, fair territory only."""
+    theta = numpy.linspace(-numpy.pi / 4, numpy.pi / 4, 80)
+    outer_pts = [(float(outer * numpy.sin(t)), float(outer * numpy.cos(t))) for t in theta]
+    inner_pts = [(float(inner * numpy.sin(t)), float(inner * numpy.cos(t))) for t in theta[::-1]]
+    return _closed_path(outer_pts + inner_pts)
+
+
+def _dirt_fill(path: str) -> dict:
+    return dict(type="path", path=path, fillcolor=_DIRT, line=dict(width=0), layer="below")
 
 
 def _line_pair(x, y, name: str | None, color: str, width: float) -> list[go.Scatter]:
@@ -1092,42 +1189,71 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
     }
     base = 90 / numpy.sqrt(2)
     second = 90 * numpy.sqrt(2)
+    home = (0.0, 0.0)
+    first = (base, base)
+    second_base = (0.0, second)
+    third = (-base, base)
     figure = go.Figure()
     order = ("popup", "ground_ball", "fly_ball", "line_drive", "home_run")
     for kind in order:
-        group = spray.loc[spray["kind"].eq(kind)]
-        if group.empty:
-            continue
-        if "label" in group.columns and "park" in group.columns:
+        group = spray.loc[spray["kind"].eq(kind)] if "kind" in spray.columns else spray.iloc[0:0]
+        has_rows = not group.empty
+        if has_rows and "label" in group.columns and "park" in group.columns:
             custom = numpy.column_stack([group["label"].to_numpy(), group["park"].to_numpy()])
             hover = "%{customdata[0]}<br>%{customdata[1]}<extra></extra>"
+            xs = group["x"]
+            ys = group["y"]
         else:
             custom = None
-            hover = names[kind]
+            hover = "skip"
+            xs = []
+            ys = []
         figure.add_trace(
             go.Scatter(
-                x=group["x"],
-                y=group["y"],
+                x=xs,
+                y=ys,
                 mode="markers",
                 name=names[kind],
+                showlegend=has_rows,
                 marker=dict(size=6 if kind != "home_run" else 8, color=colors[kind], opacity=0.72, line=dict(width=0)),
                 customdata=custom,
                 hovertemplate=hover,
             )
         )
     arc = numpy.linspace(-numpy.pi / 4, numpy.pi / 4, 90)
-    dirt = numpy.linspace(-numpy.pi * 0.72, numpy.pi * 0.72, 80)
-    dirt_x = 95 * numpy.sin(dirt)
-    dirt_y = 60.5 + 95 * numpy.cos(dirt)
-    dirt_fair = dirt_y >= numpy.abs(dirt_x)
     for trace in _line_pair([0, -420, None, 0, 420], [0, 420, None, 0, 420], "Foul lines", "#f3efe4", 1.6):
         figure.add_trace(trace)
-    for trace in _line_pair(dirt_x[dirt_fair], dirt_y[dirt_fair], "Edge of the dirt", "#f0d7b0", 2.2):
-        figure.add_trace(trace)
-    for trace in _line_pair(330 * numpy.sin(arc), 330 * numpy.cos(arc), "330 ft", "#e6b325", 2.6):
-        figure.add_trace(trace)
-    for trace in _line_pair([0, base, 0, -base, 0], [0, base, second, base, 0], None, "#f3efe4", 1.8):
-        figure.add_trace(trace)
+    figure.add_trace(
+        go.Scatter(
+            x=348 * numpy.sin(arc),
+            y=348 * numpy.cos(arc),
+            mode="lines",
+            name="Warning track",
+            line=dict(color=_DIRT, width=2),
+            hoverinfo="skip",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=330 * numpy.sin(arc),
+            y=330 * numpy.cos(arc),
+            mode="lines",
+            name="330 ft",
+            line=dict(color="#e6b325", width=2.4),
+            hoverinfo="skip",
+        )
+    )
+    figure.add_trace(
+        go.Scatter(
+            x=[-10, 10],
+            y=[60.5, 60.5],
+            mode="lines",
+            name="Mound",
+            line=dict(color="#f3efe4", width=3.6),
+            hovertext=["Pitcher's mound, 60 ft 6 in"],
+            hoverinfo="text",
+        )
+    )
     figure.add_trace(
         go.Scatter(
             x=[base, 0, -base, 0],
@@ -1139,32 +1265,19 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
             hoverinfo="text",
         )
     )
-    figure.add_trace(
-        go.Scatter(
-            x=[0],
-            y=[60.5],
-            mode="markers",
-            name="Mound",
-            marker=dict(symbol="circle", size=14, color="#8d6b4a", line=dict(color="#f0d7b0", width=1)),
-            hovertext=["Pitcher's mound, 60 ft 6 in"],
-            hoverinfo="text",
-        )
-    )
     layout = chart_layout(720)
     layout["margin"] = dict(l=48, r=24, t=48, b=36)
-    layout["plot_bgcolor"] = "#17352a"
+    layout["paper_bgcolor"] = _GRASS
+    layout["plot_bgcolor"] = _GRASS
+    layout["uirevision"] = "spray"
     layout["shapes"] = [
-        _dirt_shape(),
-        dict(
-            type="circle",
-            x0=-9,
-            x1=9,
-            y0=51.5,
-            y1=69.5,
-            fillcolor="#8d6b4a",
-            line=dict(color="#d9c4a4", width=1),
-            layer="below",
-        ),
+        _dirt_fill(_arc_band(308, 348)),
+        _dirt_fill(_lane(home, first, 7)),
+        _dirt_fill(_lane(first, second_base, 7)),
+        _dirt_fill(_lane(second_base, third, 7)),
+        _dirt_fill(_lane(third, home, 7)),
+        dict(type="circle", x0=-26, x1=26, y0=-12, y1=40, fillcolor=_DIRT, line=dict(width=0), layer="below"),
+        dict(type="circle", x0=-14, x1=14, y0=46.5, y1=74.5, fillcolor=_DIRT, line=dict(width=0), layer="below"),
     ]
     figure.update_layout(**layout)
     figure.update_xaxes(
@@ -1262,7 +1375,7 @@ def _gap_sentence(hitters: pandas.DataFrame) -> str:
         listed = f"{bits[0]}, {bits[1]}, and {bits[2]}"
     return (
         f"The widest gaps, among hitters with at least {MIN_BALLS} balls, are {listed}. "
-        "A positive number means this model values the contact higher than Savant does."
+        "A positive number means this model values the contact higher than MLB's expected weight does."
     )
 
 
@@ -1513,6 +1626,87 @@ def _spray_menu_label() -> str:
     return ", ".join(chosen)
 
 
+def _spray_park_rows(spray: pandas.DataFrame) -> list[tuple[str, str, str]]:
+    """Park abbreviation, park name, and the checkbox label: park, then club."""
+    present = set(spray["park"].astype(str)) if "park" in spray.columns else set()
+    rows = []
+    for abbr, park in PARKS.items():
+        if park in present:
+            rows.append((abbr, park, f"{park}, {CLUBS.get(abbr, abbr)}"))
+    rows.sort(key=lambda row: row[1].casefold())
+    return rows
+
+
+def _spray_choose_parks(abbrs: tuple[str, ...]) -> None:
+    for abbr in abbrs:
+        st.session_state[f"contact_spray_park_{abbr}"] = True
+
+
+def _spray_clear_parks(abbrs: tuple[str, ...]) -> None:
+    for abbr in abbrs:
+        st.session_state[f"contact_spray_park_{abbr}"] = False
+
+
+def _spray_park_label(rows: list[tuple[str, str, str]]) -> str:
+    chosen = [label for abbr, _park, label in rows if st.session_state.get(f"contact_spray_park_{abbr}", True)]
+    if len(chosen) == len(rows):
+        return "All parks"
+    if not chosen:
+        return "No parks"
+    if len(chosen) == 1:
+        return chosen[0]
+    return f"{len(chosen)} parks"
+
+
+@st.fragment
+def _spray_board(spray: pandas.DataFrame) -> None:
+    """Filters and the field. A checkbox reruns this piece only, so the rest of the page stays put."""
+    spray = spray.copy()
+    spray["outcome"] = spray["label"].map(_spray_outcome) if "label" in spray.columns else "Other"
+    for spray_name in _SPRAY_OPTIONS:
+        st.session_state.setdefault(f"contact_spray_{spray_name}", True)
+    park_rows = _spray_park_rows(spray)
+    abbrs = tuple(abbr for abbr, _park, _label in park_rows)
+    for abbr in abbrs:
+        st.session_state.setdefault(f"contact_spray_park_{abbr}", True)
+    result_col, park_col, _spray_rest = st.columns([1, 1.4, 1.6])
+    with result_col:
+        st.caption("Results")
+        with st.popover(_spray_menu_label(), width="stretch"):
+            st.button("All", on_click=_spray_choose_all, key="contact_spray_all")
+            for spray_name in _SPRAY_OPTIONS:
+                st.checkbox(spray_name, key=f"contact_spray_{spray_name}")
+    with park_col:
+        st.caption("Parks")
+        with st.popover(_spray_park_label(park_rows), width="stretch"):
+            pick, clear = st.columns(2)
+            pick.button("All", on_click=_spray_choose_parks, args=(abbrs,), key="contact_spray_park_all")
+            clear.button("None", on_click=_spray_clear_parks, args=(abbrs,), key="contact_spray_park_none")
+            for abbr, _park, label in park_rows:
+                st.checkbox(label, key=f"contact_spray_park_{abbr}")
+    spray_choices = [name for name in _SPRAY_OPTIONS if st.session_state.get(f"contact_spray_{name}", True)]
+    park_choices = {park for abbr, park, _label in park_rows if st.session_state.get(f"contact_spray_park_{abbr}", True)}
+    spray_shown = spray
+    if len(spray_choices) != len(_SPRAY_OPTIONS):
+        spray_shown = spray_shown.loc[spray_shown["outcome"].isin({_SPRAY_OUTCOME[name] for name in spray_choices})]
+    if len(park_choices) != len(park_rows):
+        spray_shown = spray_shown.loc[spray_shown["park"].isin(park_choices)]
+    st.plotly_chart(
+        spray_figure(spray_shown),
+        width="stretch",
+        key="spray_field",
+        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+    )
+    st.caption(
+        "Home plate is at the bottom. The bases are 90 feet apart, and second base is 127 feet from home. "
+        "The infield is grass, with dirt along the base paths and a dirt circle at home. "
+        "The line across the mound is the rubber. The dirt band in the outfield is the warning track. "
+        "The gold arc is 330 feet. Left field is to the left. "
+        "The marks are a sample of the scored season. Open Results or Parks and check the ones you want. "
+        "None clears every park at once. Clear every box and the field stays, with the balls taken off."
+    )
+
+
 def _forecast_prose(report: ForecastReport) -> str:
     if report.steps.empty:
         return "The season guess needs two seasons in the file. This one has a single year, so there is no finished step to show."
@@ -1565,6 +1759,49 @@ def _forecast_scale(report: ForecastReport, coming: int) -> str:
     )
 
 
+def _guess_gap_copy(study: ContactStudy) -> str:
+    """Why the gold line sits under the match, in the words that follow the chart."""
+    model = study.calibration.loc[study.calibration["source"].eq("This model")]
+    savant = study.calibration.loc[study.calibration["source"].eq("MLB expected")]
+
+    top = model.loc[model["predicted"].idxmax()]
+    savant_top = savant.loc[savant["predicted"].idxmax()]
+    pile = model.loc[model["band"].eq(0.0)] if "band" in model.columns else model.loc[model["predicted"].le(0.1)]
+    return (
+        "The gold line is this model. The blue line is MLB expected, and that is a prediction too. "
+        "Statcast builds it from how hard the ball left the bat and the angle it left. "
+        "The height of either line is the play minus that prediction. "
+        "MLB already knows how each of these balls turned out. They publish the prediction because it scores the swing on its own. "
+        "A fielder can catch a ball that contact usually turns into a hit, and the stamp on that catch is 0.\n\n"
+        "A bigger dot is more balls. Both lines use the same bands, a tenth at a time from 0 to 2, so each line has the same dots. "
+        "A call under 0 is drawn at 0. A call over 2 is drawn at 2. A home run stamp is 2, and the chart stops there. "
+        f"The crowded dots near an out are the large group: {int(pile['balls'].sum()):,} balls called between 0 and 0.1. "
+        f"The last dot is every ball called from 1.9 to 2. This model has {int(top['balls']):,} there, "
+        f"called {float(top['predicted']):.3f} against results of {float(top['actual']):.3f}. "
+        f"MLB expected has {int(savant_top['balls']):,} in that same band, "
+        f"called {float(savant_top['predicted']):.3f} against results of {float(savant_top['actual']):.3f}. "
+        f"That dot is not the season's home runs. The {study.test_label} file has 5,645 of those. "
+        "Most were called lower, because similar contact still became an out often enough to pull the average down. "
+        "Seventy balls had been drawn past 2, where the added-up trees stepped over a home run, and they now sit in that last dot.\n\n"
+        "Calls under 0.2 stay on the line. Of those 52,252 balls, 84% were outs. "
+        "The call on them averaged 0.083 and the stamps averaged 0.076. A fielder changes very few of them.\n\n"
+        "The lines open once the call passes a double. A ball called between 1.2 and 1.8 can still be a home run, an out, or a double. "
+        f"In {study.test_label} those 3,772 balls became a home run 55% of the time, an out 24% of the time, and a double 16% of the time. "
+        "The call averaged 1.515 and the plays came back at 1.355. "
+        f"The trees learned {study.train_label}, when a ball at 100 mph and 20 to 35 degrees averaged {study.hard_prior:.3f}. "
+        f"In {study.test_label} that same swing averaged {study.hard_now:.3f}, so the gold line sags through the doubles and the triples.\n\n"
+        "The park moves the size of that sag. Across those 3,772 balls the plays came back 0.160 light. "
+        "At Globe Life Field, 46% of them were outs. At Petco Park, 42% were outs. "
+        "At Dodger Stadium, 10% were outs and 77% left the yard. "
+        "The file records which park the ball was hit in. It does not carry a separate grade for the fielders. "
+        "A catch is where the park and the defense both show up.\n\n"
+        "The line comes back at a home run because a call that high clears the fence almost every time. "
+        f"Of the {int(top['balls']):,} balls in that last band, 1,071 were home runs and 29 were outs. "
+        "Those 29 are the balls a fielder brought back or that died at the wall. "
+        f"They pull the dot under the line: called {float(top['predicted']):.3f} against results of {float(top['actual']):.3f}."
+    )
+
+
 def contact_page() -> None:
     st.html('<p class="back"><a href="/">Home</a></p>')
     if not RAW.exists():
@@ -1605,28 +1842,90 @@ def contact_page() -> None:
     )
     _prose(
         "contact_fit",
-        f"I take every regular-season ball in play from {study.train_label} "
-        "and fit a model on two measurements: how hard the ball came off the bat, and the angle it left, up or down. "
-        "The model learns the wOBA weight that kind of contact produced. Walks and strikeouts stay out, "
-        f"so the number is the offense in the swing itself. I then score {study.test_label}. "
-        "Savant publishes an expected weight from those same two measurements. "
-        "The miss under the counts is the average distance between a guess and the weight of the ball that actually happened. "
-        f"This model misses by {study.mae_model:.3f}. Savant misses by {study.mae_savant:.3f}. "
-        f"A plain grid of 5 mph by 5 degree bins from {study.train_label} misses by {study.mae_bins:.3f}. "
-        "One swing is usually an out or a hit, and 0.3 is about the size of that gap. Carry the average forward. "
-        f"Among hitters with at least {MIN_BALLS} balls, this model's contact value lines up with the "
-        f"{study.test_label} results at {study.hitter_corr_model:.2f}, and Savant's at {study.hitter_corr_savant:.2f}.",
+        f"Statcast already records each of the {study.train_n:,} balls from {study.train_label}. "
+        "Two of the recordings are measurements: how hard the ball left the bat, and the angle it left. "
+        "The third is the play the fielders made of it, an out, a single, a double, a triple, or a home run. "
+        "MLB then stamps that play with a fixed wOBA weight, and that stamp is stored on the ball. "
+        "In this file an out is 0, a single is 0.9, a double is 1.25, a triple is 1.6, and a home run is 2. "
+        "The same play gets the same weight every time. A single is 0.9 whether it was a soft chopper or a laser. "
+        "That weight is the result. It is on the ball before the model runs. "
+        "The decision trees come after the stamp. They do not choose the weight. "
+        "A tree asks whether the ball was harder than some speed, and whether the angle was higher than some degree, "
+        "and it keeps splitting until the balls in a group look alike. "
+        "The guess for a new ball is the average stamped weight of the group it lands in. "
+        "Walks and strikeouts are not in this file, so the lesson is the value of the contact itself. "
+        f"{study.test_label} is already in the file, a full regular season. Those balls stay out of the lesson. "
+        f"I then ask the model what each {study.test_label} swing should have been worth, and I compare that guess with the weight already stamped on the ball. "
+        f"The average gap between those two numbers is the miss under the counts. That miss is the accuracy check. "
+        f"Teaching on {study.test_label} as well would leave no finished season to measure the miss against. "
+        f"The file stops at the {study.test_label} regular season. The season after that is the guess at the bottom of the page.",
+        "chapter",
+    )
+    st.markdown('<p class="section-label">Does the guess land on the result?</p>', unsafe_allow_html=True)
+    st.plotly_chart(
+        calibration_figure(study.calibration),
+        width="stretch",
+        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+    )
+    st.caption(
+        "Expected wOBA is the call, from an out at 0 to a home run at 2. "
+        "The height is the result minus that call. Zero, the dotted line, is a match. "
+        "A bigger dot is more balls. Both lines use the same bands, so they have the same dots. "
+        "A call under 0 or over 2 is held on the scale."
+    )
+    _prose("contact_check", _guess_gap_copy(study), "chapter")
+    _prose(
+        "contact_miss",
+        "MLB expected is a guess on one ball, on the same scale as the stamp. "
+        "Baseball Savant publishes it from exit velocity and launch angle. "
+        "A ball around 105 mph and 28 degrees is called about 1.48, between a double and a home run. "
+        "If a fielder catches it, the stamp is 0, and the miss on that ball is about 1.48. "
+        f"MLB expected miss is that distance averaged over every {study.test_label} ball. It is {study.mae_savant:.3f}. "
+        f"This model's guesses, averaged the same way, miss by {study.mae_model:.3f}. "
+        "The guess and the miss are different numbers. One is a predicted weight. The other is how far the prediction sat from the play. "
+        f"The {study.mae_model:.3f} is an average across every ball. It is not a range of plus or minus {study.mae_model:.3f} around each guess, and it does not mean the guess is wrong a third of the time. "
+        f"A call around {study.miss_facts['hard_guess']:.1f} is the average of a mix, not a double. "
+        f"Among the {study.test_label} balls this model called between 1.2 and 1.4, "
+        f"{study.miss_facts['hard_hr']:.0%} were home runs, {study.miss_facts['hard_out']:.0%} were outs, and {study.miss_facts['hard_double']:.0%} were doubles. "
+        "A home run is 2 and an out is 0. Those two pull against each other and the blend lands near 1.2. "
+        "A double weighs 1.25, which sits near that average, and only about a fifth of those balls were doubles. "
+        "The miss says a single swing is too noisy to call. Over a few hundred balls the errors shrink, which is why a hitter's average is the number to carry forward. "
+        f"The average over {MIN_BALLS} balls is the number that holds. Among hitters with at least that many balls, "
+        f"the order from this model's contact lines up with the order of their {study.test_label} results at {study.hitter_corr_model:.2f}. "
+        f"MLB expected lines up at {study.hitter_corr_savant:.2f}. A 1.00 would mean the two orders matched exactly.",
         "chapter",
     )
 
     columns = st.columns(4)
-    columns[0].metric("Balls fit", f"{study.train_n:,}")
-    columns[1].metric("Balls scored", f"{study.test_n:,}")
+    columns[0].metric("Balls in the lesson", f"{study.train_n:,}")
+    columns[1].metric(f"{study.test_label} balls graded", f"{study.test_n:,}")
     columns[2].metric("Model miss", f"{study.mae_model:.3f}")
-    columns[3].metric("Savant miss", f"{study.mae_savant:.3f}")
+    columns[3].metric("MLB's average miss", f"{study.mae_savant:.3f}")
     st.caption(
-        "Miss is the average gap between the predicted wOBA weight and the weight of what happened on that ball. "
-        "Lower is a closer call. The two models are within a few thousandths of each other."
+        f"The miss is how far a guess sat from the stamped weight, averaged over every {study.test_label} ball. "
+        "MLB expected is the guess. MLB's average miss is the size of its error. Lower is closer."
+    )
+    bands = study.miss_bands.copy()
+    bands["balls"] = bands["balls"].map(lambda count: f"{int(count):,}")
+    bands["share"] = (bands["share"] * 100).round(0).astype(int)
+    bands["error_share"] = (bands["error_share"] * 100).round(0).astype(int)
+    bands["average"] = bands["average"].astype(float).round(3)
+    bands.columns = ["Miss", "Balls", "Average miss", "Share of balls", "Share of the total miss"]
+    st.dataframe(
+        bands,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Average miss": st.column_config.NumberColumn(format="%.3f"),
+            "Share of balls": st.column_config.NumberColumn(format="%d%%"),
+            "Share of the total miss": st.column_config.NumberColumn(format="%d%%"),
+        },
+    )
+    caught_n = int(study.miss_facts["caught_n"])
+    caught_guess = float(study.miss_facts["caught_guess"])
+    st.caption(
+        f"Share of balls is how often a miss of that size happened. Share of the total miss is how much that group adds to the {study.mae_model:.3f}. "
+        f"The sharpest misses are balls the model called about {caught_guess:.2f} that a fielder caught: {caught_n:,} of them, each off by about {caught_guess:.2f}."
     )
 
     _prose(
@@ -1665,32 +1964,7 @@ def contact_page() -> None:
         "A fly ball that dies on the track in Detroit can leave the yard in Cincinnati.",
         "chapter",
     )
-    spray = study.spray.copy()
-    spray["outcome"] = spray["label"].map(_spray_outcome) if "label" in spray.columns else "Other"
-    for spray_name in _SPRAY_OPTIONS:
-        st.session_state.setdefault(f"contact_spray_{spray_name}", True)
-    spray_pick, _spray_rest = st.columns([1, 2])
-    with spray_pick:
-        st.caption("Results")
-        with st.popover(_spray_menu_label(), width="stretch"):
-            st.button("All", on_click=_spray_choose_all, key="contact_spray_all")
-            for spray_name in _SPRAY_OPTIONS:
-                st.checkbox(spray_name, key=f"contact_spray_{spray_name}")
-    spray_choices = [name for name in _SPRAY_OPTIONS if st.session_state.get(f"contact_spray_{name}", True)]
-    if len(spray_choices) == len(_SPRAY_OPTIONS):
-        spray_shown = spray
-    else:
-        spray_shown = spray.loc[spray["outcome"].isin({_SPRAY_OUTCOME[name] for name in spray_choices})]
-    if spray_shown.empty:
-        st.markdown('<p class="chapter">Pick a result and the field draws those balls from the sample.</p>', unsafe_allow_html=True)
-    else:
-        st.plotly_chart(spray_figure(spray_shown), width="stretch", config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False})
-    st.caption(
-        "Home plate is at the bottom. The bases are 90 feet apart, and second base is 127 feet from home. "
-        "The pale arc is the edge of the dirt, about 155 feet from home, past the bases. "
-        "The gold arc is 330 feet. Left field is to the left. "
-        "The marks are a sample of the scored season. Open Results, hit All, or check more than one result."
-    )
+    _spray_board(study.spray.copy())
 
     if study.zone is not None and not study.zone.empty:
         st.markdown('<p class="section-label">Where the pitch was</p>', unsafe_allow_html=True)
@@ -1716,18 +1990,6 @@ def contact_page() -> None:
             "The color bar is the average result in that square."
         )
 
-    _prose(
-        "contact_check",
-        f"On {study.test_n:,} balls from {study.test_label}, "
-        "group the guesses into tenths and compare each tenth with the results. "
-        "A model that knew the future would sit on the dotted line. "
-        "These three stay close to it, which is why the hitter averages above are usable and a single swing is not.",
-        "chapter",
-    )
-    st.markdown('<p class="section-label">Does the guess land on the result?</p>', unsafe_allow_html=True)
-    st.plotly_chart(calibration_figure(study.calibration), width="stretch", config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False})
-    st.caption("Each point is a tenth of the scored balls, grouped by that model's own prediction.")
-
     _prose("contact_gaps", _gap_sentence(study.hitters), "reading")
     _prose(
         "contact_hitters",
@@ -1739,14 +2001,14 @@ def contact_page() -> None:
     )
     _prose(
         "contact_scale",
-        f"Results, this model, and Savant are the weight of each ball, averaged over the balls he put in play. "
+        f"Results, this model, and MLB expected are the weight of each ball, averaged over the balls he put in play. "
         f"An out is 0. A single is about 0.9. A double is about 1.25. A home run is 2. "
         f"The league on the scored balls is {study.league_woba:.3f}. Above that is a good contact year. Under it is a soft one. "
         f"Hits per ball divides hits by balls in play. The league share is {study.league_hits:.3f}. "
         f"A card batting average also counts strikeouts. This file starts after the ball is hit, so the two rates use different denominators. "
         f"Singles, doubles, triples, and home runs are the counts for {study.test_label}. "
         f"Exit velocity and launch angle move the model. Outs, singles, and extra-base hits move the results. "
-        f"The gap is this model minus Savant.",
+        "The gap is this model minus MLB expected.",
         "chapter",
     )
     st.markdown('<p class="section-label">Hitters, per ball in play</p>', unsafe_allow_html=True)
@@ -1813,8 +2075,8 @@ def contact_page() -> None:
     show = (table_source.head(12) if club is None else table_source).loc[
         :, ["name", "club", "bip", "hit_rate", "singles", "doubles", "triples", "homers", "actual", "model", "savant", "gap"]
     ].copy()
-    show.columns = ["Hitter", "Team", "Balls", "Hits per ball", "1B", "2B", "3B", "HR", "Results", "This model", "Savant", "Gap"]
-    for column in ("Hits per ball", "Results", "This model", "Savant", "Gap"):
+    show.columns = ["Hitter", "Team", "Balls", "Hits per ball", "1B", "2B", "3B", "HR", "Results", "This model", "MLB expected", "Gap"]
+    for column in ("Hits per ball", "Results", "This model", "MLB expected", "Gap"):
         show[column] = show[column].astype(float).round(3)
     for column in ("1B", "2B", "3B", "HR"):
         show[column] = show[column].astype(int)
@@ -1831,7 +2093,7 @@ def contact_page() -> None:
             "HR": st.column_config.NumberColumn(format="%d"),
             "Results": st.column_config.NumberColumn(format="%.3f"),
             "This model": st.column_config.NumberColumn(format="%.3f"),
-            "Savant": st.column_config.NumberColumn(format="%.3f"),
+            "MLB expected": st.column_config.NumberColumn(format="%.3f"),
             "Gap": st.column_config.NumberColumn(format="%+.3f"),
         },
     )
@@ -1960,7 +2222,7 @@ def _cached_forecast(path: str, mtime_ns: int) -> ForecastReport:
 @st.cache_data(show_spinner="Fitting the contact model...")
 def _cached_study(path: str, mtime_ns: int) -> ContactStudy:
     del mtime_ns
-    return fit_study(pandas.read_parquet(path))  # hit counts and the quadrant
+    return fit_study(pandas.read_parquet(path))  # shared bands from an out to a home run
 
 
 if __name__ == "__main__":
