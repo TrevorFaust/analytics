@@ -466,8 +466,8 @@ def _spray_sample(test: pandas.DataFrame) -> pandas.DataFrame:
         park = pandas.Series("Ballpark", index=frame.index)
     return pandas.DataFrame(
         {
-            "x": (frame["hc_x"] - 125.42) * 2.15,
-            "y": (198.27 - frame["hc_y"]) * 2.15,
+            "x": (frame["hc_x"] - 125.42) * 2.495,
+            "y": (198.27 - frame["hc_y"]) * 2.495,
             "kind": kind.to_numpy(),
             "label": labels,
             "park": park.to_numpy(),
@@ -480,15 +480,17 @@ def _zone_grid(test: pandas.DataFrame) -> tuple[pandas.DataFrame | None, float, 
         return None, 3.4, 1.6
     frame = test.dropna(subset=["plate_x", "plate_z", "woba_value"]).copy()
     frame = frame.loc[frame["plate_x"].between(-2.2, 2.2) & frame["plate_z"].between(0.5, 4.6)]
+    if "events" in frame.columns:
+        frame = frame.loc[frame["events"].isin(("single", "double", "triple", "home_run"))]
     if frame.empty:
         return None, 3.4, 1.6
     frame["xbin"] = (numpy.round(frame["plate_x"] / 0.2) * 0.2).round(2)
     frame["zbin"] = (numpy.round(frame["plate_z"] / 0.2) * 0.2).round(2)
     grouped = (
         frame.groupby(["xbin", "zbin"], as_index=False)
-        .agg(woba=("woba_value", "mean"), pitches=("woba_value", "size"))
+        .agg(woba=("woba_value", "mean"), hits=("woba_value", "size"))
     )
-    grouped = grouped.loc[grouped["pitches"].ge(25)]
+    grouped = grouped.loc[grouped["hits"].ge(25)]
     top = float(frame["sz_top"].median()) if "sz_top" in frame.columns and frame["sz_top"].notna().any() else 3.4
     bot = float(frame["sz_bot"].median()) if "sz_bot" in frame.columns and frame["sz_bot"].notna().any() else 1.6
     return grouped, top, bot
@@ -515,7 +517,7 @@ def surface_figure(surface: pandas.DataFrame) -> go.Figure:
             y=grid.index.astype(float),
             z=grid.to_numpy(),
             zmin=0,
-            zmax=1.6,
+            zmax=2,
             colorscale=[
                 [0.0, "#2a303a"],
                 [0.25, "#3d6f7a"],
@@ -689,6 +691,76 @@ def _attach_clubs(hitters: pandas.DataFrame) -> pandas.DataFrame:
     frame = frame.merge(teams, on="batter", how="left")
     frame["club"] = frame["team"].map(CLUBS).fillna("")
     return frame
+
+
+_BAR_HOVER = """
+<script>
+(() => {
+  function barFor(node, hover) {
+    const bars = [...node.querySelectorAll(".trace.bars .point")];
+    const index = node.dataset.hoverIndex;
+    if (index !== undefined && index !== "" && bars[Number(index)]) return bars[Number(index)];
+    const box = hover.getBoundingClientRect();
+    const mid = (box.top + box.bottom) / 2;
+    let best = null;
+    let bestDist = Infinity;
+    bars.forEach((el) => {
+      const edge = el.getBoundingClientRect();
+      const dist = Math.abs((edge.top + edge.bottom) / 2 - mid);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = el;
+      }
+    });
+    return best;
+  }
+  function nudge(node) {
+    if (node.dataset.nudging) return;
+    const hover = node.querySelector(".hovertext");
+    if (!hover) return;
+    const bar = barFor(node, hover);
+    if (!bar) return;
+    const box = hover.getBoundingClientRect();
+    const edge = bar.getBoundingClientRect();
+    const shift = edge.right + 12 - box.left;
+    if (shift <= 1) return;
+    const match = /translate\\(([\\-\\d.]+)[, ]+([\\-\\d.]+)\\)/.exec(hover.getAttribute("transform") || "");
+    if (!match) return;
+    node.dataset.nudging = "1";
+    hover.setAttribute("transform", "translate(" + (parseFloat(match[1]) + shift) + "," + match[2] + ")");
+    node.dataset.nudging = "";
+  }
+  function bind(node) {
+    if (!node || node.dataset.barHover === "2" || typeof node.on !== "function") return;
+    if (!node.querySelector(".trace.bars")) return;
+    node.dataset.barHover = "2";
+    node.on("plotly_hover", (event) => {
+      const point = event.points && event.points[0];
+      if (!point || point.pointNumber == null) return;
+      node.dataset.hoverIndex = String(point.pointNumber);
+      requestAnimationFrame(() => nudge(node));
+    });
+    const layer = node.querySelector(".hoverlayer");
+    if (!layer) return;
+    new MutationObserver(() => nudge(node)).observe(layer, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["transform"],
+    });
+  }
+  function scan() {
+    document.querySelectorAll(".js-plotly-plot").forEach(bind);
+  }
+  scan();
+  const root = document.querySelector('[data-testid="stMain"]') || document.body;
+  if (!window.__barHover) {
+    window.__barHover = true;
+    new MutationObserver(scan).observe(root, { childList: true, subtree: true });
+  }
+})();
+</script>
+"""
 
 
 _FACE_LIFT = """
@@ -1117,38 +1189,21 @@ def contact_corners(hitters: pandas.DataFrame, club: str | None, league_hits: fl
     )
 
 
-_DIRT = "#a07d55"
-_GRASS = "#17352a"
-
-
-def _closed_path(points: list[tuple[float, float]]) -> str:
-    head, *rest = points
-    steps = [f"M {head[0]:.2f},{head[1]:.2f}"]
-    steps.extend(f"L {x:.2f},{y:.2f}" for x, y in rest)
+def _dirt_shape() -> dict:
+    """Skinned infield: a 95-foot arc centered on the mound, closed back to home plate."""
+    mound = 60.5
+    radius = 95.0
+    phi = numpy.linspace(-numpy.pi, numpy.pi, 361)
+    xs = radius * numpy.sin(phi)
+    ys = mound + radius * numpy.cos(phi)
+    fair = ys >= numpy.abs(xs)
+    order = numpy.argsort(xs[fair])
+    arc_x = xs[fair][order]
+    arc_y = ys[fair][order]
+    steps = [f"M 0,0 L {arc_x[0]:.2f},{arc_y[0]:.2f}"]
+    steps.extend(f"L {x:.2f},{y:.2f}" for x, y in zip(arc_x[1:], arc_y[1:]))
     steps.append("Z")
-    return " ".join(steps)
-
-
-def _lane(start: tuple[float, float], end: tuple[float, float], half_width: float) -> str:
-    """A dirt strip between two bases. The infield inside it stays grass."""
-    x0, y0 = start
-    x1, y1 = end
-    dx, dy = x1 - x0, y1 - y0
-    length = float(numpy.hypot(dx, dy))
-    px, py = -dy / length * half_width, dx / length * half_width
-    return _closed_path([(x0 + px, y0 + py), (x1 + px, y1 + py), (x1 - px, y1 - py), (x0 - px, y0 - py)])
-
-
-def _arc_band(inner: float, outer: float) -> str:
-    """Warning track: a dirt band along the outfield arc, fair territory only."""
-    theta = numpy.linspace(-numpy.pi / 4, numpy.pi / 4, 80)
-    outer_pts = [(float(outer * numpy.sin(t)), float(outer * numpy.cos(t))) for t in theta]
-    inner_pts = [(float(inner * numpy.sin(t)), float(inner * numpy.cos(t))) for t in theta[::-1]]
-    return _closed_path(outer_pts + inner_pts)
-
-
-def _dirt_fill(path: str) -> dict:
-    return dict(type="path", path=path, fillcolor=_DIRT, line=dict(width=0), layer="below")
+    return dict(type="path", path=" ".join(steps), fillcolor="#7a5a3c", line=dict(width=0), layer="below")
 
 
 def _line_pair(x, y, name: str | None, color: str, width: float) -> list[go.Scatter]:
@@ -1189,18 +1244,17 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
     }
     base = 90 / numpy.sqrt(2)
     second = 90 * numpy.sqrt(2)
-    home = (0.0, 0.0)
-    first = (base, base)
-    second_base = (0.0, second)
-    third = (-base, base)
     figure = go.Figure()
     order = ("popup", "ground_ball", "fly_ball", "line_drive", "home_run")
     for kind in order:
         group = spray.loc[spray["kind"].eq(kind)] if "kind" in spray.columns else spray.iloc[0:0]
         has_rows = not group.empty
         if has_rows and "label" in group.columns and "park" in group.columns:
-            custom = numpy.column_stack([group["label"].to_numpy(), group["park"].to_numpy()])
-            hover = "%{customdata[0]}<br>%{customdata[1]}<extra></extra>"
+            carry = numpy.hypot(group["x"].to_numpy(), group["y"].to_numpy())
+            custom = numpy.column_stack(
+                [group["label"].to_numpy(), group["park"].to_numpy(), numpy.rint(carry).astype(int)]
+            )
+            hover = "%{customdata[0]}<br>%{customdata[1]}<br>%{customdata[2]} ft from home<extra></extra>"
             xs = group["x"]
             ys = group["y"]
         else:
@@ -1221,68 +1275,79 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
             )
         )
     arc = numpy.linspace(-numpy.pi / 4, numpy.pi / 4, 90)
-    for trace in _line_pair([0, -420, None, 0, 420], [0, 420, None, 0, 420], "Foul lines", "#f3efe4", 1.6):
+    dirt = numpy.linspace(-numpy.pi * 0.72, numpy.pi * 0.72, 80)
+    dirt_x = 95 * numpy.sin(dirt)
+    dirt_y = 60.5 + 95 * numpy.cos(dirt)
+    dirt_fair = dirt_y >= numpy.abs(dirt_x)
+    for trace in _line_pair([0, -520, None, 0, 520], [0, 520, None, 0, 520], None, "#f3efe4", 1.6):
         figure.add_trace(trace)
-    figure.add_trace(
-        go.Scatter(
-            x=348 * numpy.sin(arc),
-            y=348 * numpy.cos(arc),
-            mode="lines",
-            name="Warning track",
-            line=dict(color=_DIRT, width=2),
-            hoverinfo="skip",
-        )
+    for trace in _line_pair(dirt_x[dirt_fair], dirt_y[dirt_fair], None, "#f0d7b0", 2.2):
+        figure.add_trace(trace)
+    # 2025 Seamheads marks, averaged across the 30 parks: left line 332, center 403, right line 328.
+    # cos(2 * angle) holds the fence deep through the alleys and brings it in at the poles.
+    left_pole, center_fence, right_pole = 332.0, 403.0, 328.0
+    weight = numpy.cos(2.0 * arc)
+    pole = numpy.where(arc < 0, left_pole, right_pole)
+    radius = pole + (center_fence - pole) * weight
+    fence_x = radius * numpy.sin(arc)
+    fence_y = radius * numpy.cos(arc)
+    for trace in _line_pair(fence_x, fence_y, "Average fence", "#e6b325", 2.6):
+        figure.add_trace(trace)
+    figure.data[-1].update(
+        hovertext=[f"Average fence<br>{foot:.0f} ft from home" for foot in radius],
+        hoverinfo="text",
     )
-    figure.add_trace(
-        go.Scatter(
-            x=330 * numpy.sin(arc),
-            y=330 * numpy.cos(arc),
-            mode="lines",
-            name="330 ft",
-            line=dict(color="#e6b325", width=2.4),
-            hoverinfo="skip",
-        )
-    )
-    figure.add_trace(
-        go.Scatter(
-            x=[-10, 10],
-            y=[60.5, 60.5],
-            mode="lines",
-            name="Mound",
-            line=dict(color="#f3efe4", width=3.6),
-            hovertext=["Pitcher's mound, 60 ft 6 in"],
-            hoverinfo="text",
-        )
-    )
+    for trace in _line_pair([0, base, 0, -base, 0], [0, base, second, base, 0], None, "#f3efe4", 1.8):
+        figure.add_trace(trace)
     figure.add_trace(
         go.Scatter(
             x=[base, 0, -base, 0],
             y=[base, second, base, 0],
             mode="markers",
             name="Bases",
+            showlegend=False,
             marker=dict(symbol="square", size=11, color="#f3efe4", line=dict(color="#10140f", width=1)),
             hovertext=["First base", "Second base, 127 ft from home", "Third base", "Home plate"],
             hoverinfo="text",
         )
     )
+    figure.add_trace(
+        go.Scatter(
+            x=[0],
+            y=[60.5],
+            mode="markers",
+            name="Mound",
+            showlegend=False,
+            marker=dict(symbol="circle", size=14, color="#8d6b4a", line=dict(color="#f0d7b0", width=1)),
+            hovertext=["Pitcher's mound, 60 ft 6 in"],
+            hoverinfo="text",
+        )
+    )
     layout = chart_layout(720)
-    layout["margin"] = dict(l=48, r=24, t=48, b=36)
-    layout["paper_bgcolor"] = _GRASS
-    layout["plot_bgcolor"] = _GRASS
-    layout["uirevision"] = "spray"
+    layout["margin"] = dict(l=48, r=24, t=56, b=36)
+    layout["uirevision"] = "spray-feet"
+    layout["legend"]["itemclick"] = False
+    layout["legend"]["itemdoubleclick"] = False
     layout["shapes"] = [
-        _dirt_fill(_arc_band(308, 348)),
-        _dirt_fill(_lane(home, first, 7)),
-        _dirt_fill(_lane(first, second_base, 7)),
-        _dirt_fill(_lane(second_base, third, 7)),
-        _dirt_fill(_lane(third, home, 7)),
-        dict(type="circle", x0=-26, x1=26, y0=-12, y1=40, fillcolor=_DIRT, line=dict(width=0), layer="below"),
-        dict(type="circle", x0=-14, x1=14, y0=46.5, y1=74.5, fillcolor=_DIRT, line=dict(width=0), layer="below"),
+        _dirt_shape(),
+        dict(
+            type="circle",
+            x0=-9,
+            x1=9,
+            y0=51.5,
+            y1=69.5,
+            fillcolor="#8d6b4a",
+            line=dict(color="#d9c4a4", width=1),
+            layer="below",
+        ),
     ]
     figure.update_layout(**layout)
     figure.update_xaxes(
-        title="Left field to right field",
-        range=[-250, 250],
+        title="Feet from center",
+        range=[-360, 360],
+        tickmode="array",
+        tickvals=[-300, -200, -100, 0, 100, 200, 300],
+        ticktext=["300 ft", "200 ft", "100 ft", "Center", "100 ft", "200 ft", "300 ft"],
         tickfont=dict(color="#d9d3c5"),
         showgrid=False,
         zeroline=False,
@@ -1291,7 +1356,10 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
     )
     figure.update_yaxes(
         title="Feet from home plate",
-        range=[-15, 420],
+        range=[-55, 510],
+        tickmode="array",
+        tickvals=[0, 100, 200, 300, 400, 500],
+        ticktext=["Home", "100 ft", "200 ft", "300 ft", "400 ft", "500 ft"],
         tickfont=dict(color="#d9d3c5"),
         showgrid=False,
         scaleanchor="x",
@@ -1300,29 +1368,50 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
         constraintoward="center",
         zeroline=False,
     )
+    figure.add_annotation(
+        x=-300,
+        y=-48,
+        text="Left field",
+        showarrow=False,
+        xanchor="center",
+        font=dict(color="#d9d3c5", size=13),
+    )
+    figure.add_annotation(
+        x=300,
+        y=-48,
+        text="Right field",
+        showarrow=False,
+        xanchor="center",
+        font=dict(color="#d9d3c5", size=13),
+    )
     return figure
 
 
 def zone_figure(zone: pandas.DataFrame, top: float, bot: float) -> go.Figure:
     grid = zone.pivot(index="zbin", columns="xbin", values="woba").sort_index()
+    counts = zone.pivot(index="zbin", columns="xbin", values="hits").reindex(index=grid.index, columns=grid.columns)
     inches = numpy.abs(grid.columns.astype(float).to_numpy()) * 12
-    custom = numpy.broadcast_to(inches, grid.shape).copy()
+    inch_grid = numpy.broadcast_to(inches, grid.shape)
+    custom = numpy.dstack((inch_grid, counts.to_numpy()))
     figure = go.Figure(
         go.Heatmap(
             x=grid.columns.astype(float),
             y=grid.index.astype(float),
             z=grid.to_numpy(),
             customdata=custom,
-            zmin=0.15,
-            zmax=0.7,
+            zmin=0.9,
+            zmax=1.3,
             colorscale=[
                 [0.0, "#2a303a"],
                 [0.35, "#3d6f7a"],
                 [0.6, "#e6b325"],
                 [1.0, "#d6453d"],
             ],
-            colorbar=dict(title="Avg. result", tickfont=dict(color="#d9d3c5"), title_font=dict(color="#d9d3c5")),
-            hovertemplate="%{customdata:.0f} in. from the middle<br>%{y:.1f} ft high<br>Average result %{z:.2f}<extra></extra>",
+            colorbar=dict(title="Avg. hit", tickfont=dict(color="#d9d3c5"), title_font=dict(color="#d9d3c5")),
+            hovertemplate=(
+                "%{customdata[0]:.0f} in. from the middle<br>%{y:.1f} ft high<br>"
+                "%{customdata[1]:.0f} hits<br>Average weight %{z:.2f}<extra></extra>"
+            ),
         )
     )
     figure.add_shape(
@@ -1610,6 +1699,168 @@ def forecast_corners(board: pandas.DataFrame, club: str | None, league_hits: flo
 
 _SPRAY_OPTIONS = ("Outs", "Singles", "Doubles", "Triples", "Home runs")
 _SPRAY_OUTCOME = {"Outs": "Out", "Singles": "Single", "Doubles": "Double", "Triples": "Triple", "Home runs": "Home run"}
+_SPRAY_KINDS = (
+    ("popup", "Popup"),
+    ("ground_ball", "Ground ball"),
+    ("fly_ball", "Fly ball"),
+    ("line_drive", "Line drive"),
+    ("home_run", "Home run"),
+)
+
+# 2025 foul lines. Wall height is in feet. None means the listing did not publish one.
+_FOUL_LINES = (
+    ("American Family Field", 344, 8, 345, 6),
+    ("Angel Stadium", 330, 5, 330, 5),
+    ("Busch Stadium", 336, 8, 335, 8),
+    ("Camden Yards", 333, 7, 318, 21),
+    ("Chase Field", 328, 8, 335, 8),
+    ("Citi Field", 331, 8, 330, 8),
+    ("Citizens Bank Park", 329, 11, 330, 13),
+    ("Comerica Park", 345, 6, 330, 8),
+    ("Coors Field", 347, 13, 350, 16.5),
+    ("Daikin Park", 315, 21, 326, 7),
+    ("Dodger Stadium", 330, 4, 330, 4),
+    ("Fenway Park", 310, 37, 302, 3),
+    ("Globe Life Field", 329, 8, 326, 8),
+    ("Great American Ball Park", 328, 12, 325, 8),
+    ("Kauffman Stadium", 330, 8, 330, 8),
+    ("Nationals Park", 336, 8, 335, 12),
+    ("Oracle Park", 339, 8, 309, 25),
+    ("Petco Park", 336, 4, 322, 10),
+    ("PNC Park", 325, 6, 320, 21),
+    ("Progressive Field", 325, 19, 325, 14),
+    ("Rate Field", 330, 8, 335, 8),
+    ("Rogers Centre", 328, 10, 328, 10),
+    ("Steinbrenner Field", 318, None, 314, None),
+    ("Sutter Health Park", 330, None, 325, None),
+    ("T-Mobile Park", 331, 8, 326, 8),
+    ("Target Field", 339, 8, 328, 23),
+    ("Truist Park", 335, 6, 325, 16),
+    ("Wrigley Field", 355, 16, 353, 16),
+    ("Yankee Stadium", 318, 8, 314, 8),
+    ("loanDepot park", 344, 7, 335, 7),
+)
+
+# Primary club color, bright enough to read on the dark field. Steinbrenner was the Rays' 2025 home.
+_MLB_COLORS = {
+    "ARI": "#A71930",
+    "AZ": "#A71930",
+    "ATL": "#CE1141",
+    "BAL": "#DF4601",
+    "BOS": "#BD3039",
+    "CHC": "#0E3386",
+    "CWS": "#C4CED4",
+    "CIN": "#C6011F",
+    "CLE": "#E31937",
+    "COL": "#8A4FBF",
+    "DET": "#FA4616",
+    "HOU": "#EB6E1F",
+    "KC": "#004687",
+    "LAA": "#BA0021",
+    "LAD": "#005A9C",
+    "MIA": "#00A3E0",
+    "MIL": "#FFC52F",
+    "MIN": "#D31145",
+    "NYM": "#FF5910",
+    "NYY": "#1C4E9A",
+    "ATH": "#EFB21E",
+    "OAK": "#EFB21E",
+    "PHI": "#E81828",
+    "PIT": "#FDB827",
+    "SD": "#FFC425",
+    "SF": "#FD5A1E",
+    "SEA": "#0C8A8A",
+    "STL": "#C41E3A",
+    "TB": "#8FBCE6",
+    "TEX": "#C0111F",
+    "TOR": "#134A8E",
+    "WSH": "#AB0003",
+}
+_PARK_CLUB = {park: abbr for abbr, park in PARKS.items()}
+_PARK_CLUB["Steinbrenner Field"] = "TB"
+
+
+def fence_lines_figure(side: str) -> go.Figure:
+    """The 12 shortest foul lines on one side. Each bar uses that club's color."""
+    distance_at = 1 if side == "left" else 3
+    wall_at = 2 if side == "left" else 4
+    rows = sorted(_FOUL_LINES, key=lambda row: (row[distance_at], row[0]))[:12]
+    names = [row[0] for row in rows]
+    feet = [row[distance_at] for row in rows]
+    walls = ["not listed" if row[wall_at] is None else f"{row[wall_at]:g} ft" for row in rows]
+    colors = [_MLB_COLORS.get(_PARK_CLUB.get(name, ""), "#f3efe4") for name in names]
+    average = float(numpy.mean([row[distance_at] for row in _FOUL_LINES]))
+    figure = go.Figure(
+        go.Bar(
+            y=names,
+            x=feet,
+            orientation="h",
+            marker=dict(color=colors),
+            text=[f"{foot:g}" for foot in feet],
+            textposition="outside",
+            textfont=dict(color="#f3efe4", size=13),
+            customdata=walls,
+            hovertemplate="%{y}<br>%{x:.0f} ft from home<br>Wall %{customdata}<extra></extra>",
+            cliponaxis=False,
+        )
+    )
+    figure.add_vline(x=average, line_dash="dot", line_color="#f3efe4", line_width=1.2)
+    figure.add_annotation(
+        x=average,
+        y=1,
+        yref="paper",
+        text=f"Average {average:.0f} ft",
+        showarrow=False,
+        xanchor="right",
+        yanchor="bottom",
+        xshift=-6,
+        font=dict(color="#f3efe4", size=12),
+    )
+    # Start just under the shortest porch. Stop at 340 so the average line is not
+    # stranded in a long empty stretch.
+    shortest = min(feet)
+    low = int(numpy.floor((shortest - 8) / 5.0) * 5)
+    high = 340
+    layout = chart_layout(460)
+    layout["margin"] = dict(l=168, r=108, t=36, b=48)
+    layout["hovermode"] = "closest"
+    layout["hoverlabel"] = dict(
+        bgcolor="#2a303a",
+        bordercolor="#4c5566",
+        font_size=13,
+        font_family="Barlow, sans-serif",
+        align="left",
+    )
+    figure.update_layout(**layout)
+    figure.update_xaxes(
+        title="Feet from home plate",
+        range=[low, high],
+        dtick=10,
+        tickfont=dict(color="#d9d3c5"),
+        gridcolor="#3a4150",
+    )
+    figure.update_yaxes(
+        autorange="reversed",
+        tickfont=dict(color="#d9d3c5"),
+        gridcolor="#3a4150",
+    )
+    return figure
+
+
+def _spray_choose_kinds() -> None:
+    for kind, _label in _SPRAY_KINDS:
+        st.session_state[f"contact_spray_kind_{kind}"] = True
+
+
+def _spray_kind_label() -> str:
+    chosen = [label for kind, label in _SPRAY_KINDS if st.session_state.get(f"contact_spray_kind_{kind}", True)]
+    if len(chosen) == len(_SPRAY_KINDS):
+        return "All"
+    if not chosen:
+        return "None"
+    if len(chosen) == 1:
+        return chosen[0]
+    return f"{len(chosen)} types"
 
 
 def _spray_choose_all() -> None:
@@ -1665,17 +1916,25 @@ def _spray_board(spray: pandas.DataFrame) -> None:
     spray["outcome"] = spray["label"].map(_spray_outcome) if "label" in spray.columns else "Other"
     for spray_name in _SPRAY_OPTIONS:
         st.session_state.setdefault(f"contact_spray_{spray_name}", True)
+    for kind, _label in _SPRAY_KINDS:
+        st.session_state.setdefault(f"contact_spray_kind_{kind}", True)
     park_rows = _spray_park_rows(spray)
     abbrs = tuple(abbr for abbr, _park, _label in park_rows)
     for abbr in abbrs:
         st.session_state.setdefault(f"contact_spray_park_{abbr}", True)
-    result_col, park_col, _spray_rest = st.columns([1, 1.4, 1.6])
+    result_col, kind_col, park_col = st.columns([1, 1.15, 1.45])
     with result_col:
         st.caption("Results")
         with st.popover(_spray_menu_label(), width="stretch"):
             st.button("All", on_click=_spray_choose_all, key="contact_spray_all")
             for spray_name in _SPRAY_OPTIONS:
                 st.checkbox(spray_name, key=f"contact_spray_{spray_name}")
+    with kind_col:
+        st.caption("Hit type")
+        with st.popover(_spray_kind_label(), width="stretch"):
+            st.button("All", on_click=_spray_choose_kinds, key="contact_spray_kind_all")
+            for kind, label in _SPRAY_KINDS:
+                st.checkbox(label, key=f"contact_spray_kind_{kind}")
     with park_col:
         st.caption("Parks")
         with st.popover(_spray_park_label(park_rows), width="stretch"):
@@ -1685,10 +1944,13 @@ def _spray_board(spray: pandas.DataFrame) -> None:
             for abbr, _park, label in park_rows:
                 st.checkbox(label, key=f"contact_spray_park_{abbr}")
     spray_choices = [name for name in _SPRAY_OPTIONS if st.session_state.get(f"contact_spray_{name}", True)]
+    kind_choices = {kind for kind, _label in _SPRAY_KINDS if st.session_state.get(f"contact_spray_kind_{kind}", True)}
     park_choices = {park for abbr, park, _label in park_rows if st.session_state.get(f"contact_spray_park_{abbr}", True)}
     spray_shown = spray
     if len(spray_choices) != len(_SPRAY_OPTIONS):
         spray_shown = spray_shown.loc[spray_shown["outcome"].isin({_SPRAY_OUTCOME[name] for name in spray_choices})]
+    if len(kind_choices) != len(_SPRAY_KINDS):
+        spray_shown = spray_shown.loc[spray_shown["kind"].isin(kind_choices)]
     if len(park_choices) != len(park_rows):
         spray_shown = spray_shown.loc[spray_shown["park"].isin(park_choices)]
     st.plotly_chart(
@@ -1697,13 +1959,15 @@ def _spray_board(spray: pandas.DataFrame) -> None:
         key="spray_field",
         config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
     )
+    outcomes = spray["label"].map(_spray_outcome) if "label" in spray.columns else pandas.Series(dtype=str)
+    hr_marks = int(outcomes.eq("Home run").sum())
+    triple_marks = int(outcomes.eq("Triple").sum())
+    double_marks = int(outcomes.eq("Double").sum())
+    single_marks = int(outcomes.eq("Single").sum())
+    out_marks = int(outcomes.eq("Out").sum())
     st.caption(
-        "Home plate is at the bottom. The bases are 90 feet apart, and second base is 127 feet from home. "
-        "The infield is grass, with dirt along the base paths and a dirt circle at home. "
-        "The line across the mound is the rubber. The dirt band in the outfield is the warning track. "
-        "The gold arc is 330 feet. Left field is to the left. "
-        "The marks are a sample of the scored season. Open Results or Parks and check the ones you want. "
-        "None clears every park at once. Clear every box and the field stays, with the balls taken off."
+        f"The marks are {len(spray):,} of the scored season's balls in play, picked at random so the field stays readable. "
+        f"This graph has {hr_marks:,} home runs and {triple_marks:,} triples, {double_marks:,} doubles, {single_marks:,} singles, and {out_marks:,} outs."
     )
 
 
@@ -1861,6 +2125,41 @@ def contact_page() -> None:
         f"The file stops at the {study.test_label} regular season. The season after that is the guess at the bottom of the page.",
         "chapter",
     )
+    st.markdown('<p class="section-label">How hard, and how high</p>', unsafe_allow_html=True)
+    st.plotly_chart(surface_figure(study.surface), width="stretch", config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False})
+    _prose(
+        "contact_heat_after",
+        "Left to right is how hard the ball came off the bat, and bottom to top is the angle. "
+        "Each cell is the wOBA the trees guess for that pair. Dark is weak contact. "
+        "The red patch around 110 mph and 30 degrees is where the guess reaches a home run.",
+        "chapter",
+    )
+    st.caption(
+        f"Fit on {study.train_label}. Each cell is the model's expected wOBA weight for that exit velocity and launch angle. "
+        "This is the contact after the swing. The barrel is the red patch around 100 mph and 25 to 35 degrees, "
+        "the band where the home runs sit. It is not a drawing of the strike zone."
+    )
+    if study.zone is not None and not study.zone.empty:
+        st.markdown('<p class="section-label">Where the pitch was</p>', unsafe_allow_html=True)
+        _prose(
+            "contact_zone",
+            "This is the strike zone, and only the hits. I dropped the outs. An out weighs 0, and mixing those in dragged every square down. "
+            "The box is a typical zone. Across the bottom, the numbers are inches from the middle of the plate, "
+            "counted outward on both sides. Inside and outside flip with the hitter, so a minus sign would point the wrong way for half the swings. "
+            "Up the chart is the height of the pitch, in feet, as it crosses the plate. "
+            "Color is the average weight of the hits from that square. A single is 0.9, a double is 1.25, and a home run is 2. "
+            "A square of singles sits near 0.9. Gold and red squares had more doubles and home runs.",
+            "chapter",
+        )
+        st.plotly_chart(
+            zone_figure(study.zone, study.zone_top, study.zone_bot),
+            width="stretch",
+            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+        )
+        st.caption(
+            "Each square needs at least 25 hits from the scored season. Outs are not in the average. "
+            "The outline is the median top and bottom of the zone."
+        )
     st.markdown('<p class="section-label">Does the guess land on the result?</p>', unsafe_allow_html=True)
     st.plotly_chart(
         calibration_figure(study.calibration),
@@ -1874,121 +2173,51 @@ def contact_page() -> None:
         "A call under 0 or over 2 is held on the scale."
     )
     _prose("contact_check", _guess_gap_copy(study), "chapter")
-    _prose(
-        "contact_miss",
-        "MLB expected is a guess on one ball, on the same scale as the stamp. "
-        "Baseball Savant publishes it from exit velocity and launch angle. "
-        "A ball around 105 mph and 28 degrees is called about 1.48, between a double and a home run. "
-        "If a fielder catches it, the stamp is 0, and the miss on that ball is about 1.48. "
-        f"MLB expected miss is that distance averaged over every {study.test_label} ball. It is {study.mae_savant:.3f}. "
-        f"This model's guesses, averaged the same way, miss by {study.mae_model:.3f}. "
-        "The guess and the miss are different numbers. One is a predicted weight. The other is how far the prediction sat from the play. "
-        f"The {study.mae_model:.3f} is an average across every ball. It is not a range of plus or minus {study.mae_model:.3f} around each guess, and it does not mean the guess is wrong a third of the time. "
-        f"A call around {study.miss_facts['hard_guess']:.1f} is the average of a mix, not a double. "
-        f"Among the {study.test_label} balls this model called between 1.2 and 1.4, "
-        f"{study.miss_facts['hard_hr']:.0%} were home runs, {study.miss_facts['hard_out']:.0%} were outs, and {study.miss_facts['hard_double']:.0%} were doubles. "
-        "A home run is 2 and an out is 0. Those two pull against each other and the blend lands near 1.2. "
-        "A double weighs 1.25, which sits near that average, and only about a fifth of those balls were doubles. "
-        "The miss says a single swing is too noisy to call. Over a few hundred balls the errors shrink, which is why a hitter's average is the number to carry forward. "
-        f"The average over {MIN_BALLS} balls is the number that holds. Among hitters with at least that many balls, "
-        f"the order from this model's contact lines up with the order of their {study.test_label} results at {study.hitter_corr_model:.2f}. "
-        f"MLB expected lines up at {study.hitter_corr_savant:.2f}. A 1.00 would mean the two orders matched exactly.",
-        "chapter",
-    )
-
-    columns = st.columns(4)
-    columns[0].metric("Balls in the lesson", f"{study.train_n:,}")
-    columns[1].metric(f"{study.test_label} balls graded", f"{study.test_n:,}")
-    columns[2].metric("Model miss", f"{study.mae_model:.3f}")
-    columns[3].metric("MLB's average miss", f"{study.mae_savant:.3f}")
-    st.caption(
-        f"The miss is how far a guess sat from the stamped weight, averaged over every {study.test_label} ball. "
-        "MLB expected is the guess. MLB's average miss is the size of its error. Lower is closer."
-    )
-    bands = study.miss_bands.copy()
-    bands["balls"] = bands["balls"].map(lambda count: f"{int(count):,}")
-    bands["share"] = (bands["share"] * 100).round(0).astype(int)
-    bands["error_share"] = (bands["error_share"] * 100).round(0).astype(int)
-    bands["average"] = bands["average"].astype(float).round(3)
-    bands.columns = ["Miss", "Balls", "Average miss", "Share of balls", "Share of the total miss"]
-    st.dataframe(
-        bands,
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Average miss": st.column_config.NumberColumn(format="%.3f"),
-            "Share of balls": st.column_config.NumberColumn(format="%d%%"),
-            "Share of the total miss": st.column_config.NumberColumn(format="%d%%"),
-        },
-    )
-    caught_n = int(study.miss_facts["caught_n"])
-    caught_guess = float(study.miss_facts["caught_guess"])
-    st.caption(
-        f"Share of balls is how often a miss of that size happened. Share of the total miss is how much that group adds to the {study.mae_model:.3f}. "
-        f"The sharpest misses are balls the model called about {caught_guess:.2f} that a fielder caught: {caught_n:,} of them, each off by about {caught_guess:.2f}."
-    )
-
-    _prose(
-        "contact_heat_line",
-        "Dark is weak contact. Gold is a hit. Red is the home-run band.",
-        "reading",
-    )
-    _prose(
-        "contact_heat",
-        "Read the sheet left to right for how hard, and bottom to top for how high. "
-        f"A home run in these seasons left the bat at a median {study.hr_speed:.0f} mph and {study.hr_angle:.0f} degrees, "
-        f"and that event weighs {study.hr_weight:.1f}. "
-        f"Line drives, around {study.ld_angle:.0f} degrees, averaged {study.ld_woba:.2f}. "
-        f"Ground balls, around {study.gb_angle:.0f} degrees, averaged {study.gb_woba:.2f}. "
-        f"Popups, up near {study.pu_angle:.0f} degrees, averaged {study.pu_woba:.3f}. "
-        "A hitter who keeps living in the red and the gold band is the one whose numbers should hold up next month. "
-        "A hitter whose balls sit on the popup rows, or on weak ground balls, is living on results the contact will have trouble repeating.",
-        "chapter",
-    )
-    st.markdown('<p class="section-label">How hard, and how high</p>', unsafe_allow_html=True)
-    st.plotly_chart(surface_figure(study.surface), width="stretch", config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False})
-    st.caption(
-        f"Fit on {study.train_label}. Each cell is the model's expected wOBA weight for that exit velocity and launch angle. "
-        "This is the contact after the swing. The barrel is the red patch around 100 mph and 25 to 35 degrees, "
-        "the band where the home runs sit. It is not a drawing of the strike zone."
-    )
 
     st.markdown('<p class="section-label">Where the ball came down</p>', unsafe_allow_html=True)
     _prose(
-        "contact_spray",
-        f"Same idea, drawn on the field. I sampled {study.test_label} balls in play so the grass stays readable. "
-        "Line drives fill the gaps. Home runs clear the 330-foot arc. Popups drop around the bases. "
-        "The sheet above is the quality of the contact. This drawing is where that contact came down: "
-        "a ball in the seats, a ball at an infielder, or a ball through the hole. "
-        "Hover a mark for the result and the ballpark. "
-        "A fly ball that dies on the track in Detroit can leave the yard in Cincinnati.",
+        "contact_spray_1",
+        "Now that we have explored how the balls are hit and rated based off of the exit velocity and angle, we need to see how much a certain other factor effects these balls actual rating. Of course that other factor is the stadium of play. From those balls closest to the 2.0 weight, we judged the average as leaving the bat at about 107 mph and a 27 degree launch angle traveling about 415 feet. Like we said, these balls were absolutely nuked and obviously are a homerun in every park. Except they aren't......these balls fall short of clearing every fence in 4 parks.  That's Fenway, Comercia, Oracle Park, and Coors Field. Obviously I'm looking at only the deepest parts of these fields and if the batter hits that same ball to right or left, it is likely a homerun.",
         "chapter",
     )
     _spray_board(study.spray.copy())
-
-    if study.zone is not None and not study.zone.empty:
-        st.markdown('<p class="section-label">Where the pitch was</p>', unsafe_allow_html=True)
-        _prose(
-            "contact_zone",
-            "This is the strike zone, and only the pitches the hitter put in play. "
-            "The box is a typical zone. Across the bottom, the numbers are inches from the middle of the plate, "
-            "counted outward on both sides. Inside and outside flip with the hitter, so a minus sign would point the wrong way for half the swings. "
-            "Up the chart is the height of the pitch, in feet, as it crosses the plate. "
-            "Color is the average result of the balls put in play from that square, on the same wOBA weight as the rest of the page. "
-            "An out is 0, a single is about 0.9, and a home run is 2.0. "
-            "A square averages many balls, so it lands between those: near 0.25 when they became outs, near 0.55 when more of them became hits. "
-            "Gold and red squares are where that contact turned into hits. Dark squares mostly became outs.",
-            "chapter",
+    _prose(
+        "contact_spray_2",
+        "Some marks sit past the foul lines. A ground ball can pass first or third in fair ground and roll foul, and the dot is where the fielder picked it up. In the strip within 3 degrees of the line, the median ball is 174 feet from home, 27% of them were doubles, and 55% were outs. The home runs and triples drawn there were fair balls. In 2025, 265 home runs sit past the line, and 240 of them are within 3 degrees of it, about 322 feet from home. There are 134 triples past the line, 109 of them within 3 degrees, and those came down about 262 feet out. The line on the chart is a flat 45 degrees, so a ball that hooks around the pole lands a couple of degrees outside it. Farther into foul ground the marks are popups. Past 55 degrees the median spot is 55 feet from home, three quarters of them are popups, and 90% are outs.",
+        "chapter",
+    )
+    _prose(
+        "contact_spray_3",
+        "The gold line is the average fence. It runs 332 feet down the left field line, 403 feet to center, and 328 feet down the right field line. On balls that traveled 330 to 370 feet and stayed fair, left field was a home run 84% of the time and an out 3% of the time. Right field was 84% and 3%. Center field was an out 46% of the time and a home run 32% of the time. Once the ball carried 370 to 410 feet, center field was a home run 92% of the time, with 7% doubles, and left and right were home runs 99% of the time.",
+        "chapter",
+    )
+    porch_left, porch_right = st.columns(2)
+    with porch_left:
+        st.markdown(
+            '<p class="chart-title" style="text-align:center;color:#f3efe4;font-family:Fraunces,serif;font-size:1.45rem;font-weight:560;letter-spacing:-0.02em;margin:0.35rem auto 0.2rem;">Shortest left fields</p>',
+            unsafe_allow_html=True,
         )
         st.plotly_chart(
-            zone_figure(study.zone, study.zone_top, study.zone_bot),
+            fence_lines_figure("left"),
             width="stretch",
             config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
         )
-        st.caption(
-            "Each cell keeps a spot with at least 25 balls in play. The outline is the median top and bottom of the zone. "
-            "The color bar is the average result in that square."
+    with porch_right:
+        st.markdown(
+            '<p class="chart-title" style="text-align:center;color:#f3efe4;font-family:Fraunces,serif;font-size:1.45rem;font-weight:560;letter-spacing:-0.02em;margin:0.35rem auto 0.2rem;">Shortest right fields</p>',
+            unsafe_allow_html=True,
         )
+        st.plotly_chart(
+            fence_lines_figure("right"),
+            width="stretch",
+            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+        )
+    st.caption(
+        "The 12 shortest foul lines in 2025. Each bar is that club's color. "
+        "The dotted line is the average foul line on that side, across all 30 parks. "
+        "Hover a bar for the wall height."
+    )
+    st.html(_BAR_HOVER, unsafe_allow_javascript=True)
 
     _prose("contact_gaps", _gap_sentence(study.hitters), "reading")
     _prose(
@@ -2222,7 +2451,7 @@ def _cached_forecast(path: str, mtime_ns: int) -> ForecastReport:
 @st.cache_data(show_spinner="Fitting the contact model...")
 def _cached_study(path: str, mtime_ns: int) -> ContactStudy:
     del mtime_ns
-    return fit_study(pandas.read_parquet(path))  # shared bands from an out to a home run
+    return fit_study(pandas.read_parquet(path))  # zone chart averages hits only
 
 
 if __name__ == "__main__":

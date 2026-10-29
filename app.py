@@ -304,10 +304,6 @@ div[data-testid="stMarkdownContainer"]:has(.mast) {
   max-width: 68rem;
   overflow: hidden;
 }
-.st-key-spray_field,
-.st-key-spray_field [data-testid="stPlotlyChart"] {
-  background: #17352a;
-}
 .modebar-container, .modebar {
   display: none !important;
 }
