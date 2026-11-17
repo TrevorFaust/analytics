@@ -475,12 +475,12 @@ def _spray_sample(test: pandas.DataFrame) -> pandas.DataFrame:
     )
 
 
-def _zone_grid(test: pandas.DataFrame) -> tuple[pandas.DataFrame | None, float, float]:
+def _zone_grid(test: pandas.DataFrame, *, hits_only: bool = True) -> tuple[pandas.DataFrame | None, float, float]:
     if not {"plate_x", "plate_z"}.issubset(test.columns):
         return None, 3.4, 1.6
     frame = test.dropna(subset=["plate_x", "plate_z", "woba_value"]).copy()
     frame = frame.loc[frame["plate_x"].between(-2.2, 2.2) & frame["plate_z"].between(0.5, 4.6)]
-    if "events" in frame.columns:
+    if hits_only and "events" in frame.columns:
         frame = frame.loc[frame["events"].isin(("single", "double", "triple", "home_run"))]
     if frame.empty:
         return None, 3.4, 1.6
@@ -488,12 +488,24 @@ def _zone_grid(test: pandas.DataFrame) -> tuple[pandas.DataFrame | None, float, 
     frame["zbin"] = (numpy.round(frame["plate_z"] / 0.2) * 0.2).round(2)
     grouped = (
         frame.groupby(["xbin", "zbin"], as_index=False)
-        .agg(woba=("woba_value", "mean"), hits=("woba_value", "size"))
+        .agg(woba=("woba_value", "mean"), balls=("woba_value", "size"))
     )
-    grouped = grouped.loc[grouped["hits"].ge(25)]
+    grouped = grouped.loc[grouped["balls"].ge(25)]
     top = float(frame["sz_top"].median()) if "sz_top" in frame.columns and frame["sz_top"].notna().any() else 3.4
     bot = float(frame["sz_bot"].median()) if "sz_bot" in frame.columns and frame["sz_bot"].notna().any() else 1.6
     return grouped, top, bot
+
+
+@st.cache_data(show_spinner=False)
+def _zone_boards(path: str, mtime_ns: int) -> tuple[pandas.DataFrame | None, pandas.DataFrame | None, float, float]:
+    """Hits-only grid and the full balls-in-play grid for the scored season."""
+    del mtime_ns
+    columns = ["season", "game_date", "plate_x", "plate_z", "woba_value", "events", "sz_top", "sz_bot"]
+    balls = pandas.read_parquet(path, columns=columns)
+    _train, test, _train_label, _test_label = _split(balls)
+    hits, top, bot = _zone_grid(test, hits_only=True)
+    everything, _top, _bot = _zone_grid(test, hits_only=False)
+    return hits, everything, top, bot
 
 
 def chart_layout(height: int) -> dict:
@@ -1387,30 +1399,46 @@ def spray_figure(spray: pandas.DataFrame) -> go.Figure:
     return figure
 
 
-def zone_figure(zone: pandas.DataFrame, top: float, bot: float) -> go.Figure:
+def zone_figure(zone: pandas.DataFrame, top: float, bot: float, *, hits_only: bool) -> go.Figure:
     grid = zone.pivot(index="zbin", columns="xbin", values="woba").sort_index()
-    counts = zone.pivot(index="zbin", columns="xbin", values="hits").reindex(index=grid.index, columns=grid.columns)
+    counts = zone.pivot(index="zbin", columns="xbin", values="balls").reindex(index=grid.index, columns=grid.columns)
     inches = numpy.abs(grid.columns.astype(float).to_numpy()) * 12
     inch_grid = numpy.broadcast_to(inches, grid.shape)
     custom = numpy.dstack((inch_grid, counts.to_numpy()))
+    if hits_only:
+        zmin, zmax = 0.9, 1.3
+        bar_title = "Avg. hit"
+        counted = "hits"
+        # Dark at a single, gold through the extra-base hits, red at a home run.
+        colorscale = [
+            [0.0, "#2a303a"],
+            [0.35, "#3d6f7a"],
+            [0.6, "#e6b325"],
+            [1.0, "#d6453d"],
+        ]
+    else:
+        zmin, zmax = 0.15, 0.5
+        bar_title = "Avg. result"
+        counted = "balls"
+        # A 0.5 is still mostly outs. Use the dark-to-teal step the hits chart
+        # uses from 0.9 to just past 1.0. Gold and red stay on the hits chart.
+        colorscale = [
+            [0.0, "#2a303a"],
+            [1.0, "#3d6f7a"],
+        ]
     figure = go.Figure(
         go.Heatmap(
             x=grid.columns.astype(float),
             y=grid.index.astype(float),
             z=grid.to_numpy(),
             customdata=custom,
-            zmin=0.9,
-            zmax=1.3,
-            colorscale=[
-                [0.0, "#2a303a"],
-                [0.35, "#3d6f7a"],
-                [0.6, "#e6b325"],
-                [1.0, "#d6453d"],
-            ],
-            colorbar=dict(title="Avg. hit", tickfont=dict(color="#d9d3c5"), title_font=dict(color="#d9d3c5")),
+            zmin=zmin,
+            zmax=zmax,
+            colorscale=colorscale,
+            colorbar=dict(title=bar_title, tickfont=dict(color="#d9d3c5"), title_font=dict(color="#d9d3c5")),
             hovertemplate=(
                 "%{customdata[0]:.0f} in. from the middle<br>%{y:.1f} ft high<br>"
-                "%{customdata[1]:.0f} hits<br>Average weight %{z:.2f}<extra></extra>"
+                "%{customdata[1]:.0f} " + counted + "<br>Average weight %{z:.2f}<extra></extra>"
             ),
         )
     )
@@ -1449,6 +1477,36 @@ def zone_figure(zone: pandas.DataFrame, top: float, bot: float) -> go.Figure:
         constraintoward="center",
     )
     return figure
+
+
+@st.fragment
+def _zone_board(hits: pandas.DataFrame, everything: pandas.DataFrame, top: float, bot: float) -> None:
+    """Hits or every ball in play. The switch reruns this piece only."""
+    mode = st.segmented_control(
+        "Zone balls",
+        ["Hits", "All contact"],
+        default="Hits",
+        key="contact_zone_mode",
+        label_visibility="collapsed",
+        required=True,
+        width="content",
+    )
+    hits_only = mode != "All contact"
+    st.plotly_chart(
+        zone_figure(hits if hits_only else everything, top, bot, hits_only=hits_only),
+        width="stretch",
+        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+    )
+    if hits_only:
+        st.caption(
+            "Each square needs at least 25 hits from the scored season. Outs are not in the average. "
+            "The outline is the median top and bottom of the zone."
+        )
+    else:
+        st.caption(
+            "Each square needs at least 25 balls in play from the scored season. Outs are in the average. "
+            "The outline is the median top and bottom of the zone."
+        )
 
 
 def _gap_sentence(hitters: pandas.DataFrame) -> str:
@@ -2127,6 +2185,11 @@ def contact_page() -> None:
     )
     st.markdown('<p class="section-label">How hard, and how high</p>', unsafe_allow_html=True)
     st.plotly_chart(surface_figure(study.surface), width="stretch", config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False})
+    st.caption(
+        f"Fit on {study.train_label}. Each cell is the model's expected wOBA weight for that exit velocity and launch angle. "
+        "This is the contact after the swing. The barrel is the red patch around 100 mph and 25 to 35 degrees, "
+        "the band where the home runs sit. It is not a drawing of the strike zone."
+    )
     _prose(
         "contact_heat_after",
         "Left to right is how hard the ball came off the bat, and bottom to top is the angle. "
@@ -2134,12 +2197,8 @@ def contact_page() -> None:
         "The red patch around 110 mph and 30 degrees is where the guess reaches a home run.",
         "chapter",
     )
-    st.caption(
-        f"Fit on {study.train_label}. Each cell is the model's expected wOBA weight for that exit velocity and launch angle. "
-        "This is the contact after the swing. The barrel is the red patch around 100 mph and 25 to 35 degrees, "
-        "the band where the home runs sit. It is not a drawing of the strike zone."
-    )
-    if study.zone is not None and not study.zone.empty:
+    hits_zone, all_zone, zone_top, zone_bot = _zone_boards(str(RAW), RAW.stat().st_mtime_ns)
+    if hits_zone is not None and not hits_zone.empty and all_zone is not None and not all_zone.empty:
         st.markdown('<p class="section-label">Where the pitch was</p>', unsafe_allow_html=True)
         _prose(
             "contact_zone",
@@ -2151,16 +2210,14 @@ def contact_page() -> None:
             "A square of singles sits near 0.9. Gold and red squares had more doubles and home runs.",
             "chapter",
         )
-        st.plotly_chart(
-            zone_figure(study.zone, study.zone_top, study.zone_bot),
-            width="stretch",
-            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
-        )
-        st.caption(
-            "Each square needs at least 25 hits from the scored season. Outs are not in the average. "
-            "The outline is the median top and bottom of the zone."
-        )
+        _zone_board(hits_zone, all_zone, zone_top, zone_bot)
     st.markdown('<p class="section-label">Does the guess land on the result?</p>', unsafe_allow_html=True)
+    _prose(
+        "contact_zone_after",
+        "The middle of the zone is where those hits carry more weight. "
+        "Low and away, a square sits closer to a single.",
+        "chapter",
+    )
     st.plotly_chart(
         calibration_figure(study.calibration),
         width="stretch",
@@ -2219,6 +2276,11 @@ def contact_page() -> None:
     )
     st.html(_BAR_HOVER, unsafe_allow_javascript=True)
 
+    st.markdown(
+        '<hr class="part-break">'
+        '<p class="part-title">The bats the box score buried</p>',
+        unsafe_allow_html=True,
+    )
     _prose("contact_gaps", _gap_sentence(study.hitters), "reading")
     _prose(
         "contact_hitters",
