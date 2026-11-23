@@ -1,0 +1,20 @@
+name: Keep the app awake
+
+on:
+  schedule:
+    # Every 4 hours. Streamlit sleeps after 12 hours with no live session,
+    # so one delayed run still lands inside that window.
+    - cron: "17 */4 * * *"
+  workflow_dispatch:
+
+jobs:
+  wake:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Wake the Streamlit app
+        run: node scripts/keep-awake.mjs
