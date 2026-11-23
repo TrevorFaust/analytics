@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import html
+import unicodedata
 import urllib.request
 from collections import deque
 from dataclasses import dataclass
@@ -25,10 +26,10 @@ from sklearn.ensemble import HistGradientBoostingRegressor
 RAW = Path(__file__).resolve().parent / "data" / "baseball" / "statcast_bip.parquet"
 HEADS = RAW.parent / "heads"
 TEAMS = RAW.parent / "batter_team.parquet"
-BIRTHS = RAW.parent / "birth_dates.parquet"
 MIN_BALLS = 200
 NEXT_BALLS = 100
 PARK_PRIOR = 2000
+SWING_PRIOR = 300
 FEATURES = ("launch_speed", "launch_angle")
 CLUBS = {
     "ARI": "Arizona",
@@ -1238,6 +1239,7 @@ def _marked_figure(
     hover_fn,
     x_digits: int,
     y_digits: int,
+    y_tickformat: str | None = None,
 ) -> go.Figure:
     faces, dots, bounds = _marked_layout(frame, club, x_col, y_col, x_mark, y_mark)
     figure = go.Figure()
@@ -1306,7 +1308,7 @@ def _marked_figure(
     figure.update_layout(**layout)
     axis = dict(tickfont=dict(color="#d9d3c5"), gridcolor="#3a4150", zeroline=False, autorange=False)
     x_format = f".{x_digits}f" if x_digits else "d"
-    y_format = f".{y_digits}f" if y_digits else "d"
+    y_format = y_tickformat or (f".{y_digits}f" if y_digits else "d")
     figure.update_xaxes(title=x_title, range=[x0, x1], tickformat=x_format, **axis)
     figure.update_yaxes(title=y_title, range=[y0, y1], tickformat=y_format, **axis)
     return figure
@@ -1368,20 +1370,12 @@ def _production_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
             club.fillna("").to_numpy(),
             frame["homers"].to_numpy(),
             frame["hit_rate"].to_numpy(),
-            frame["bip"].to_numpy(),
-            frame["singles"].to_numpy(),
-            frame["doubles"].to_numpy(),
-            frame["triples"].to_numpy(),
-            frame["actual"].to_numpy(),
         ]
     )
     template = (
         "%{text}<br>%{customdata[0]}"
         "<br>%{customdata[1]:.0f} home runs"
-        "<br>Hits per ball %{customdata[2]:.3f}"
-        "<br>%{customdata[4]:.0f} singles, %{customdata[5]:.0f} doubles, %{customdata[6]:.0f} triples"
-        "<br>%{customdata[3]:.0f} balls in play"
-        "<br>Results %{customdata[7]:.3f}<extra></extra>"
+        "<br>Hit pct %{customdata[2]:.1%}<extra></extra>"
     )
     return custom, template
 
@@ -1395,7 +1389,7 @@ def hits_homers_figure(hitters: pandas.DataFrame, club: str | None, hr_line: flo
         hr_line,
         league_hits,
         "Home runs",
-        "Hits per ball in play",
+        "Hit %",
         (
             "More home runs, more hits",
             "Fewer home runs, more hits",
@@ -1405,6 +1399,7 @@ def hits_homers_figure(hitters: pandas.DataFrame, club: str | None, hr_line: flo
         _production_hover,
         0,
         3,
+        ".0%",
     )
 
 
@@ -1768,13 +1763,6 @@ def _place_word(number: int) -> str:
     return {1: "first", 2: "second", 3: "third", 4: "fourth"}.get(int(number), _ord(number))
 
 
-def _tied_place(hitters: pandas.DataFrame, row: pandas.Series, column: str) -> str:
-    word = _place_word(_rank_of(hitters, row, column))
-    if int(hitters[column].eq(row[column]).sum()) > 1:
-        return f"tied for {word}"
-    return word
-
-
 def _weight(value: float) -> str:
     return f"{value:.3f}"
 
@@ -1789,38 +1777,6 @@ def _four_rows(hitters: pandas.DataFrame) -> dict[str, pandas.Series] | None:
     if any(row is None for row in rows.values()):
         return None
     return rows
-
-
-def _buried_hitters(study: ContactStudy) -> str:
-    roster = _attach_clubs(study.hitters)
-    rows = _four_rows(roster)
-    if rows is None:
-        return (
-            "The face is the hitter, with the gray studio backdrop taken off. "
-            "A face above the line beat the contact. A face under the line did less with it than the launch said."
-        )
-    judge, ohtani, kurtz, stowers = (rows[name] for name in ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers"))
-    raleigh = _hitter_row(roster, "Cal Raleigh")
-    schwarber = _hitter_row(roster, "Kyle Schwarber")
-    qualifiers = len(roster)
-    lead = ""
-    if raleigh is not None and schwarber is not None:
-        lead = (
-            f"I lined up the {qualifiers} hitters who put {MIN_BALLS} balls in play, and I started with home runs, "
-            f"the column a box score leads with. {raleigh['name']} had {int(raleigh['homers'])}. "
-            f"{schwarber['name']} had {int(schwarber['homers'])}. "
-            f"Ohtani had {int(ohtani['homers'])} and Judge had {int(judge['homers'])}. "
-            f"Kurtz hit {int(kurtz['homers'])}, {_tied_place(roster, kurtz, 'homers')}. "
-            f"Stowers hit {int(stowers['homers'])}, {_tied_place(roster, stowers, 'homers')}.\n\n"
-        )
-    return (
-        f"{lead}"
-        f"Sorted by the weight of each ball, the order changes. "
-        f"Judge is {_place_word(_rank_of(roster, judge, 'actual'))} at {_weight(judge['actual'])}. "
-        f"Kurtz is {_place_word(_rank_of(roster, kurtz, 'actual'))} at {_weight(kurtz['actual'])}, on {int(kurtz['bip'])} balls. "
-        f"Ohtani is {_place_word(_rank_of(roster, ohtani, 'actual'))} at {_weight(ohtani['actual'])}. "
-        f"Stowers is {_place_word(_rank_of(roster, stowers, 'actual'))} at {_weight(stowers['actual'])}, on {int(stowers['bip'])} balls."
-    )
 
 
 def _face_note(roster: pandas.DataFrame, stowers: pandas.Series) -> str:
@@ -1916,112 +1872,87 @@ def _buried_scale(study: ContactStudy) -> str:
     )
 
 
-def _buried_quadrant(study: ContactStudy) -> str:
-    roster = _attach_clubs(study.hitters)
-    rows = _four_rows(roster)
-    beat = roster["actual"] - roster["model"]
-    edge = roster["hit_rate"] - float(study.league_hits)
-    right = beat.ge(0)
-    up = edge.ge(0)
-    high_hits = int((right & up).sum())
-    high_short = int((~right & up).sum())
-    low_hits = int((right & ~up).sum())
-    low_short = int((~right & ~up).sum())
-    if rows is None:
-        return (
-            f"Right of center, his results beat this model. Left of center, the launch was worth more than the results. "
-            f"Above center, more of his balls became hits than the league share of {study.league_hits:.3f}."
-        )
-    judge, ohtani, kurtz, stowers = (rows[name] for name in ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers"))
-    shortfalls = {
-        "Ohtani": float(ohtani["model"] - ohtani["actual"]),
-        "Judge": float(judge["model"] - judge["actual"]),
-        "Stowers": float(stowers["model"] - stowers["actual"]),
-        "Kurtz": float(kurtz["model"] - kurtz["actual"]),
-    }
-    widest = max(shortfalls, key=shortfalls.get)
-    ohtani_gap = f"Ohtani's results came back {_weight(shortfalls['Ohtani'])} under the launch"
-    if widest == "Ohtani":
-        ohtani_gap += ", the widest shortfall of the four"
-    judge_hits = (
-        f"Judge's hit rate leads the file at {_share(judge['hit_rate'])}"
-        if _rank_of(roster, judge, "hit_rate") == 1
-        else f"Judge's hit rate is {_place_word(_rank_of(roster, judge, 'hit_rate'))} at {_share(judge['hit_rate'])}"
-    )
-    corner = roster.loc[right & up]
-    kurtz_corner = ""
-    if not corner.empty and int(corner.loc[corner["actual"].idxmax(), "batter"]) == int(kurtz["batter"]):
-        kurtz_corner = f" His results are the highest of the {high_hits} in that corner."
+def _mix_setup(roster: pandas.DataFrame, league_hits: float) -> str:
+    hr_line = float(roster["homers"].median())
+    hr_label = f"{hr_line:.0f}" if abs(hr_line - round(hr_line)) < 0.05 else f"{hr_line:.1f}"
     return (
-        f"The cross splits the same {len(roster)} seasons. "
-        f"Right of center, the results beat the launch. Left of center, the launch was worth more than the plays that followed. "
-        f"Above center, he beat the league hit rate of {_share(study.league_hits)}. Below center, fewer of his balls became hits.\n\n"
-        f"Judge, Ohtani, and Stowers land left and above. "
-        f"{ohtani_gap}, "
-        f"with a hit on {_share(ohtani['hit_rate'])} of his balls, {_place_word(_rank_of(roster, ohtani, 'hit_rate'))} in the file. "
-        f"{judge_hits}, "
-        f"and the plays finished {_weight(shortfalls['Judge'])} under his launch of {_weight(judge['model'])}. "
-        f"Stowers is {_weight(shortfalls['Stowers'])} under his own launch, close to the center line, "
-        f"with a hit on {_share(stowers['hit_rate'])} of balls, {_place_word(_rank_of(roster, stowers, 'hit_rate'))} in the file.\n\n"
-        f"Kurtz is the face on the right. The results beat his launch by {_weight(kurtz['actual'] - kurtz['model'])}, "
-        f"and {_share(kurtz['hit_rate'])} of his balls became hits, {_place_word(_rank_of(roster, kurtz, 'hit_rate'))} in the file. "
-        f"{high_hits} qualifiers sit in that corner.{kurtz_corner} "
-        f"The launch had already placed him {_place_word(_rank_of(roster, kurtz, 'model'))}, at {_weight(kurtz['model'])}, on {int(kurtz['bip'])} balls. "
-        f"The count under the chart is the full split: {high_short} up and to the left, {high_hits} up and to the right, "
-        f"{low_short} down and to the left, and {low_hits} down and to the right.\n\n"
-        "The table under that count is a separate cut. "
-        "Gap is this model minus MLB's expected weight. On All, the rows are the widest of those disagreements."
+        f"I kept the same {len(roster)} hitters and split them by home runs and by hits. "
+        f"A home run counts once on this chart, the same as a single. "
+        f"Left to right is the season home-run count. Bottom to top is hits divided by balls in play. "
+        f"The vertical line is {hr_label} home runs, the middle of this group. "
+        f"The horizontal line is {_share(league_hits)}, the share of every scored ball that became a hit."
+    )
+
+
+def _mix_names(roster: pandas.DataFrame) -> str:
+    wanted = (
+        "Cal Raleigh",
+        "Junior Caminero",
+        "Jonathan Aranda",
+        "Romy Gonzalez",
+        "Santiago Espinal",
+    )
+    rows = {name: _hitter_row(roster, name) for name in wanted}
+    if any(row is None for row in rows.values()):
+        return (
+            "The right side is the home-run list. The top left is a high hit rate on fewer home runs. "
+            "The bottom left is a quiet season on both."
+        )
+    raleigh, caminero, aranda, gonzalez, espinal = (rows[name] for name in wanted)
+    swing = ""
+    profile = _launch_profile(str(RAW), RAW.stat().st_mtime_ns)
+    match = profile.loc[profile["batter"].eq(int(gonzalez["batter"]))]
+    if not match.empty:
+        swing = (
+            f" His balls left the bat at {float(match.iloc[0]['ev']):.1f} mph "
+            f"and {float(match.iloc[0]['la']):.1f} degrees."
+        )
+    home_runs = "no home runs" if int(espinal["homers"]) == 0 else f"{int(espinal['homers'])} home runs"
+    return (
+        f"Cal Raleigh hit {int(raleigh['homers'])} home runs and {_share(raleigh['hit_rate'])} of his balls became hits. "
+        f"Junior Caminero hit {int(caminero['homers'])} home runs. His hit rate was {_share(caminero['hit_rate'])}. "
+        f"Jonathan Aranda hit {int(aranda['homers'])} home runs and finished "
+        f"{_place_word(_rank_of(roster, aranda, 'actual'))} in true result, at {_weight(aranda['actual'])}. "
+        f"{_share(aranda['hit_rate'])} of his balls became hits. "
+        f"Romy Gonzalez hit {int(gonzalez['homers'])} home runs.{swing} "
+        f"{_share(gonzalez['hit_rate'])} of his balls became hits. "
+        f"Santiago Espinal had {home_runs} and a {_share(espinal['hit_rate'])} hit rate."
     )
 
 
 def _buried_forecast(report: ForecastReport) -> str:
-    if report.steps.empty or report.board.empty:
-        return _forecast_prose(report)
     board = report.board
-    wanted = ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers")
-    rows = {name: _hitter_row(board, name) for name in wanted}
-    if any(row is None for row in rows.values()):
+    if board.empty or "swing" not in board.columns:
         return _forecast_prose(report)
-    judge, ohtani, kurtz, stowers = (rows[name] for name in wanted)
-    last = report.steps.iloc[-1]
-    coming = int(last.nxt) + 1
-
-    def age_bit(row: pandas.Series) -> str:
-        if pandas.isna(row["age"]):
-            return ""
-        return f" He is {int(row['age'])} on opening day."
-
-    kurtz_drop = float(kurtz["actual"] - kurtz["guess"])
-    drop_line = ""
-    if kurtz_drop > float(judge["actual"] - judge["guess"]) and kurtz_drop > float(ohtani["actual"] - ohtani["guess"]):
-        drop_line = "Kurtz drops farther than either of them. "
-    kurtz_subject = "His" if drop_line else "Kurtz's"
-    above_league = all(float(row["guess"]) > float(report.league_woba) for row in (judge, ohtani, kurtz, stowers))
-    under_last = all(float(row["guess"]) < float(row["actual"]) for row in (judge, ohtani, kurtz, stowers))
-    closing = ""
-    if above_league and under_last:
-        closing = (
-            f"Each of those guesses sits under the {int(last.nxt)} results and above the league weight of {_weight(report.league_woba)}."
-        )
-
+    coming = int(report.steps.iloc[-1].nxt) + 1 if not report.steps.empty else max(report.seasons) + 1
+    last = coming - 1
+    judge = _hitter_row(board, "Aaron Judge")
+    raleigh = _hitter_row(board, "Cal Raleigh")
+    gimenez = _hitter_row(board, "Andrés Giménez")
+    if gimenez is None:
+        folded = board["name"].map(lambda name: unicodedata.normalize("NFKD", str(name)).encode("ascii", "ignore").decode())
+        match = board.loc[folded.str.contains("Gimenez", case=False)]
+        gimenez = None if match.empty else match.iloc[0]
+    kurtz = _hitter_row(board, "Nick Kurtz")
+    if any(row is None for row in (judge, raleigh, gimenez, kurtz)):
+        return _forecast_prose(report)
     return (
-        f"Contact from {int(last.prior)}, pulled toward the league, missed {int(last.nxt)} by {last.mae_contact:.3f} "
-        f"across {int(last.pairs)} hitters. Carrying the results forward missed by {last.mae_results:.3f}. "
-        f"The {coming} guess uses that same pull. It starts from the contact stored on each ball and draws it toward "
-        f"the league weight of {_weight(report.league_woba)}. More balls keep a hitter closer to his own contact.\n\n"
-        f"Judge's stored contact was {_weight(judge['contact'])}, so the guess comes out at {_weight(judge['guess'])}, "
-        f"{_place_word(_rank_of(board, judge, 'guess'))} on the board.{age_bit(judge)} "
-        f"Ohtani's contact was {_weight(ohtani['contact'])} and the guess is {_weight(ohtani['guess'])}, "
-        f"{_place_word(_rank_of(board, ohtani, 'guess'))}.{age_bit(ohtani)} "
-        f"Both sit under their {int(last.nxt)} results, which puts them left of center. "
-        f"The height is last year's hit rate, so both stay in the upper half.\n\n"
-        f"{drop_line}{kurtz_subject} results were {_weight(kurtz['actual'])} and the stored contact was "
-        f"{_weight(kurtz['contact'])}, on {int(kurtz['bip'])} balls, so the league takes a larger share of the guess. "
-        f"It comes out at {_weight(kurtz['guess'])}, {_ord(_rank_of(board, kurtz, 'guess'))}.{age_bit(kurtz)} "
-        f"His home park column is {kurtz['park']:+.3f}, and the guess leaves that out. "
-        f"Stowers goes from results of {_weight(stowers['actual'])} to a guess of {_weight(stowers['guess'])}, "
-        f"{_ord(_rank_of(board, stowers, 'guess'))}.{age_bit(stowers)} "
-        f"{closing}"
+        f"The {coming} guess follows the swings. "
+        "Statcast already turns exit velocity and launch angle into a weight on each ball. "
+        "I average that weight by season, count the latest year five times, the year before four, then three, two, and one, "
+        f"and mix in {SWING_PRIOR} balls of league contact. A short sample stays closer to the league.\n\n"
+        f"Aaron Judge's swings have said the same thing for years. "
+        f"His {last} result was {_weight(float(judge['actual']))} and the guess is {_weight(float(judge['swing']))}. "
+        f"Cal Raleigh's earlier contact was {_weight(float(raleigh['prior_contact']))}. "
+        f"The {last} swings rose to {_weight(float(raleigh['contact']))} and the results went to {_weight(float(raleigh['actual']))}. "
+        f"The guess is {_weight(float(raleigh['swing']))}. "
+        f"{gimenez['name']}'s contact has sat near {_weight(float(gimenez['prior_contact']))}. "
+        f"The {last} result was {_weight(float(gimenez['actual']))}, and the guess puts him back at {_weight(float(gimenez['swing']))}. "
+        f"Nick Kurtz has no earlier season in the file. "
+        f"His swings graded {_weight(float(kurtz['contact']))} against a {_weight(float(kurtz['actual']))} result, "
+        f"so the guess is {_weight(float(kurtz['swing']))}.\n\n"
+        f"The chart puts the guess left to right and the {last} result bottom to top. "
+        "Above the line, the season ran ahead of the swings. Under the line, the season came in light of them."
     )
 
 
@@ -2059,6 +1990,35 @@ def _season_table(frame: pandas.DataFrame) -> pandas.DataFrame:
     return table
 
 
+_SWING_WEIGHTS = {0: 5, 1: 4, 2: 3, 3: 2, 4: 1}
+
+
+def _swing_history(
+    tables: dict[int, pandas.DataFrame], last: int, league: float
+) -> tuple[pandas.Series, pandas.Series]:
+    """Recency-weighted contact, plus the contact from the seasons before last."""
+    pieces = []
+    earlier = []
+    for year, table in tables.items():
+        weight = _SWING_WEIGHTS.get(last - year, 0)
+        if weight == 0:
+            continue
+        piece = table.loc[:, ["bip", "contact"]].copy()
+        piece["num"] = weight * piece["bip"] * piece["contact"]
+        piece["den"] = weight * piece["bip"]
+        pieces.append(piece)
+        if year < last:
+            earlier.append(table.loc[:, ["bip", "contact"]])
+    hist = pandas.concat(pieces)
+    grouped = hist.groupby(level=0)[["num", "den"]].sum()
+    swing = (grouped["num"] + league * SWING_PRIOR) / (grouped["den"] + SWING_PRIOR)
+    if not earlier:
+        return swing, pandas.Series(dtype=float)
+    prior = pandas.concat(earlier)
+    prior_contact = (prior["contact"] * prior["bip"]).groupby(level=0).sum() / prior["bip"].groupby(level=0).sum()
+    return swing, prior_contact
+
+
 def _park_effect(frame: pandas.DataFrame) -> pandas.Series:
     grouped = frame.groupby("home_team").agg(
         n=("woba_value", "size"),
@@ -2067,14 +2027,6 @@ def _park_effect(frame: pandas.DataFrame) -> pandas.Series:
     )
     gap = grouped["actual"] - grouped["contact"]
     return gap * grouped["n"] / (grouped["n"] + PARK_PRIOR)
-
-
-def _opening_age(birth: pandas.Timestamp, year: int) -> int | None:
-    if pandas.isna(birth):
-        return None
-    opening = (3, 28)
-    born = (int(birth.month), int(birth.day))
-    return int(year - birth.year - (opening < born))
 
 
 def build_forecast(balls: pandas.DataFrame) -> ForecastReport:
@@ -2086,7 +2038,6 @@ def build_forecast(balls: pandas.DataFrame) -> ForecastReport:
             "batter",
             "name",
             "club",
-            "age",
             "bip",
             "singles",
             "doubles",
@@ -2097,6 +2048,8 @@ def build_forecast(balls: pandas.DataFrame) -> ForecastReport:
             "actual",
             "park",
             "guess",
+            "swing",
+            "prior_contact",
         ]
     )
     if not needed.issubset(balls.columns):
@@ -2157,23 +2110,16 @@ def build_forecast(balls: pandas.DataFrame) -> ForecastReport:
     board["guess"] = league + trust * (board["contact"] - league)
     board["park"] = board["team"].map(effects[last]).fillna(0.0)
     board["club"] = board["team"].map(CLUBS).fillna("")
-    if BIRTHS.exists():
-        births = pandas.read_parquet(BIRTHS, columns=["batter", "birth"])
-        births["batter"] = pandas.to_numeric(births["batter"], errors="coerce").astype("int64")
-        births["birth"] = pandas.to_datetime(births["birth"], errors="coerce")
-        births = births.drop_duplicates("batter")
-        board = board.merge(births, on="batter", how="left")
-        board["age"] = board["birth"].map(lambda birth: _opening_age(birth, last + 1)).astype("Int64")
-    else:
-        board["age"] = pandas.Series(pandas.NA, index=board.index, dtype="Int64")
     board["name"] = _batter_names(board["batter"])
     last_events = balls.loc[balls["season"].eq(last), "events"].astype(str) if "events" in balls.columns else pandas.Series(dtype=str)
     league_hits = float(last_events.isin(["single", "double", "triple", "home_run"]).mean()) if len(last_events) else float("nan")
+    swing, prior_contact = _swing_history(tables, last, league)
+    board["swing"] = board["batter"].map(swing)
+    board["prior_contact"] = board["batter"].map(prior_contact)
     keep = [
         "batter",
         "name",
         "club",
-        "age",
         "bip",
         "singles",
         "doubles",
@@ -2184,62 +2130,114 @@ def build_forecast(balls: pandas.DataFrame) -> ForecastReport:
         "actual",
         "park",
         "guess",
+        "swing",
+        "prior_contact",
     ]
     board = board.loc[:, keep]
-    board = board.sort_values("guess", ascending=False).reset_index(drop=True)
+    board = board.sort_values("swing", ascending=False).reset_index(drop=True)
     return ForecastReport(seasons, steps, board, balls_mae, league, league_hits)
 
 
-def _forecast_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
-    ages = ["" if pandas.isna(age) else str(int(age)) for age in frame["age"]]
+def _forecast_hover(frame: pandas.DataFrame, year: int) -> tuple[numpy.ndarray, str]:
+    club = frame["club"] if "club" in frame.columns else pandas.Series("", index=frame.index)
+    contact = frame["contact"].map(lambda value: f"{float(value):.3f}")
+    earlier = frame["prior_contact"].map(
+        lambda value: "First year in the file" if pandas.isna(value) else f"{float(value):.3f}"
+    )
     custom = numpy.column_stack(
         [
-            frame["club"].fillna("").astype(str).to_numpy(),
-            numpy.array(ages, dtype=object),
-            frame["bip"].map(lambda balls: f"{int(balls)}").to_numpy(),
-            frame["contact"].map(lambda value: f"{value:.3f}").to_numpy(),
-            frame["actual"].map(lambda value: f"{value:.3f}").to_numpy(),
-            frame["guess"].map(lambda value: f"{value:.3f}").to_numpy(),
-            frame["hit_rate"].map(lambda value: f"{value:.3f}").to_numpy(),
-            frame["park"].map(lambda value: f"{value:+.3f}").to_numpy(),
-            frame["singles"].map(lambda value: f"{int(value)}").to_numpy(),
-            frame["doubles"].map(lambda value: f"{int(value)}").to_numpy(),
-            frame["triples"].map(lambda value: f"{int(value)}").to_numpy(),
-            frame["homers"].map(lambda value: f"{int(value)}").to_numpy(),
+            club.fillna("").astype(str).to_numpy(),
+            contact.to_numpy(),
+            earlier.to_numpy(),
         ]
     )
     template = (
-        "%{text}<br>%{customdata[0]}<br>Age %{customdata[1]}"
-        "<br>Guess minus last year %{x:+.3f}"
-        "<br>Hits per ball vs league %{y:+.3f}"
-        "<br>Guess %{customdata[5]}<br>Last year %{customdata[4]}<br>Contact %{customdata[3]}"
-        "<br>Hits per ball %{customdata[6]}<br>Park %{customdata[7]}"
-        "<br>%{customdata[8]} singles, %{customdata[9]} doubles, %{customdata[10]} triples, %{customdata[11]} HR"
-        "<br>%{customdata[2]} balls<extra></extra>"
+        "%{text}<br>%{customdata[0]}"
+        f"<br>{year} swing guess %{{x:.3f}}"
+        f"<br>{year - 1} result %{{y:.3f}}"
+        "<br>This year contact %{customdata[1]}"
+        "<br>Earlier contact %{customdata[2]}<extra></extra>"
     )
     return custom, template
 
 
-def forecast_figure(board: pandas.DataFrame, year: int, club: str | None, league_hits: float) -> go.Figure:
-    """Guess versus last year's results, crossed with hits per ball versus the league."""
+def forecast_figure(board: pandas.DataFrame, year: int, club: str | None) -> go.Figure:
+    """Next year's swing guess against last year's result. Same number sits on the dotted line."""
     frame = board.copy()
-    frame["rise"] = frame["guess"] - frame["actual"]
-    frame["hit_edge"] = frame["hit_rate"] - float(league_hits)
-    return _cross_figure(
-        frame,
-        club,
-        "rise",
-        "hit_edge",
-        f"Guess for {year}, minus {year - 1} results",
-        "Hits per ball, minus the league",
-        (
-            "Small rise, high hit rate",
-            "Comes off last year",
-            "Rises, results trailed contact",
-            "Falls, low hit rate",
-        ),
-        _forecast_hover,
+    frame["model"] = frame["swing"]
+    faces, dots, bounds = _hitter_layout(frame, club)
+    if bounds is None:
+        figure = go.Figure()
+        figure.update_layout(**chart_layout(420))
+        return figure
+    x0, x1, y0, y1, face_x, face_y = bounds
+    figure = go.Figure()
+    line_lo = max(x0, y0)
+    line_hi = min(x1, y1)
+    figure.add_trace(
+        go.Scatter(
+            x=[line_lo, line_hi],
+            y=[line_lo, line_hi],
+            mode="lines",
+            name="Guess matches the result",
+            line=dict(color="#b7b2a4", width=1, dash="dot"),
+            hoverinfo="skip",
+        )
     )
+    if not dots.empty:
+        custom, template = _forecast_hover(dots, year)
+        figure.add_trace(
+            go.Scatter(
+                x=dots["model"],
+                y=dots["actual"],
+                mode="markers",
+                name="Other hitters",
+                marker=dict(size=7, color="#8d8474", opacity=0.9, line=dict(width=0)),
+                text=dots["name"],
+                customdata=custom,
+                hovertemplate=template,
+            )
+        )
+    images, faced = _stamp_faces(faces, "model", "actual", face_x, face_y)
+    if not faced.empty:
+        custom, template = _forecast_hover(faced, year)
+        figure.add_trace(
+            go.Scatter(
+                x=faced["model"],
+                y=faced["actual"],
+                mode="markers",
+                name="Hitters",
+                marker=dict(
+                    size=42 if club else 28,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=0, color="rgba(0,0,0,0)"),
+                ),
+                showlegend=False,
+                text=faced["name"],
+                customdata=custom,
+                hovertemplate=template,
+            )
+        )
+    layout = chart_layout(620 if club else 680)
+    layout["margin"] = dict(l=56, r=24, t=40, b=48)
+    layout["images"] = images
+    layout["hovermode"] = "closest"
+    figure.update_layout(**layout)
+    figure.update_xaxes(
+        title=f"{year} swing guess, per ball",
+        range=[x0, x1],
+        tickfont=dict(color="#d9d3c5"),
+        gridcolor="#3a4150",
+        autorange=False,
+    )
+    figure.update_yaxes(
+        title=f"{year - 1} result, per ball",
+        range=[y0, y1],
+        tickfont=dict(color="#d9d3c5"),
+        gridcolor="#3a4150",
+        autorange=False,
+    )
+    return figure
 
 
 def forecast_corners(board: pandas.DataFrame, club: str | None, league_hits: float) -> pandas.DataFrame:
@@ -2551,7 +2549,6 @@ def _forecast_prose(report: ForecastReport) -> str:
         f"Carrying the results forward instead missed {int(last.nxt)} by {last.mae_results:.3f}. "
         f"Adding half of his home park's gap missed by {last.mae_park:.4f}, against {last.mae_contact:.4f} for contact alone, so the {coming} guess leaves the park in its own column. "
         f"A full season of balls still sits partway toward the league, which is why a great contact year comes out closer to average on the {coming} list. "
-        f"Age is opening day {coming}, and this draft leaves age out of the formula. "
         f"Last year's ball count missed the next season by about {report.balls_mae:.0f} balls among hitters who came back. "
         f"Shrinking that count did not tighten the miss, so the guess is a rate. "
         f"The {coming} column uses the same rule on {int(last.nxt)}. "
@@ -2623,44 +2620,25 @@ def _guess_gap_copy(study: ContactStudy) -> str:
     )
 
 
-def _chart_key(roster: pandas.DataFrame, league_woba: float) -> None:
+def _chart_key(league_woba: float) -> None:
     """Definitions next to the team picker. Hover or click the mark."""
-    row = _hitter_row(roster, "Nick Kurtz")
-    result_example = ""
-    model_example = ""
-    hit_example = ""
-    if row is not None:
-        hits = int(row["singles"] + row["doubles"] + row["triples"] + row["homers"])
-        balls = int(row["bip"])
-        result_example = (
-            f" Nick Kurtz's true result is {row['actual']:.3f}, "
-            f"the weights on his {balls} balls divided by {balls}."
-        )
-        model_example = (
-            f" Nick Kurtz's model prediction is {row['model']:.3f}. "
-            f"His true result is {row['actual']:.3f}, so the plays came back heavier than the guess."
-        )
-        hit_example = f" Nick Kurtz had {hits} hits in {balls} balls, {row['hit_rate'] * 100:.1f}%."
     notes = (
         (
             "True result",
             "The height of the dot. Each ball has a weight: an out is 0, a single is 0.9, a double is 1.25, "
             "a triple is 1.6, and a home run is 2. Add the weights and divide by the balls he put in play. "
             f"The league on every scored ball is {league_woba:.3f}. "
-            "A batting average divides hits by at-bats. This number is the average weight."
-            + result_example,
+            "A batting average divides hits by at-bats. This number is the average weight.",
         ),
         (
             "Model prediction",
-            "The left-to-right position. Your model scores each ball from its exit velocity and launch angle, "
-            "then those scores are averaged. The guess comes from how similar contact turned out in the earlier seasons."
-            + model_example,
+            "The left-to-right position. The model scores each ball from its exit velocity and launch angle, "
+            "then those scores are averaged. The guess comes from how similar contact turned out in the earlier seasons.",
         ),
         (
             "Hit %",
             "How often a ball in play became a hit. Hits divided by balls in play. "
-            "A single and a home run each count once. Strikeouts are not in the count."
-            + hit_example,
+            "A single and a home run each count once. Strikeouts are not in the count.",
         ),
         (
             "Dotted line",
@@ -2839,7 +2817,6 @@ def contact_page() -> None:
         '<p class="part-title">The bats the box score buried</p>',
         unsafe_allow_html=True,
     )
-    _prose("contact_hitters", _buried_hitters(study), "chapter")
     _prose("contact_scale", _buried_scale(study), "chapter")
     st.markdown('<p class="section-label">Hitters, per ball in play</p>', unsafe_allow_html=True)
     roster = _attach_clubs(study.hitters)
@@ -2850,7 +2827,7 @@ def contact_page() -> None:
     with picker:
         choice = st.selectbox("Team", ["All", *club_names], key="contact_club")
     with key_col:
-        _chart_key(roster, study.league_woba)
+        _chart_key(study.league_woba)
     club = None if choice == "All" else choice
     faces, dots, _bounds = _hitter_layout(roster, club)
     if faces.empty and dots.empty:
@@ -2881,27 +2858,19 @@ def contact_page() -> None:
             "A hitter who changed clubs is listed with the team they took the most balls with."
         )
 
+    _prose(
+        "contact_read",
+        "The big winner from this can clearly be seen as Nick Kurtz.",
+        "chapter",
+    )
+
+    st.markdown('<p class="section-label">The home run is one hit</p>', unsafe_allow_html=True)
+    _prose("contact_mix", _mix_setup(roster, study.league_hits), "chapter")
+    _prose("contact_names", _mix_names(roster), "chapter")
     shown = roster if club is None else roster.loc[roster["club"].eq(club)]
     if not shown.empty:
-        swung = roster.dropna(subset=["ev", "la"])
-        ev_line = float(swung["ev"].mean())
-        la_line = float(swung["la"].mean())
         hr_line = float(roster["homers"].median())
         hr_label = f"{hr_line:.0f}" if abs(hr_line - round(hr_line)) < 0.05 else f"{hr_line:.1f}"
-        st.markdown('<p class="section-label">Power and lift</p>', unsafe_allow_html=True)
-        st.plotly_chart(
-            power_pop_figure(roster, club, ev_line, la_line),
-            width="stretch",
-            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
-        )
-        st.html(_FACE_LIFT, unsafe_allow_javascript=True)
-        st.caption(
-            f"Each mark is that hitter's average on the balls he put in play. "
-            f"The cross is the average of the {len(swung)} qualifiers, {ev_line:.1f} mph and {la_line:.1f} degrees. "
-            "Right of the line is harder than that. Above it is a higher path. "
-            "The lines stay on the full list when a team is chosen."
-        )
-        st.markdown('<p class="section-label">Home runs and hits</p>', unsafe_allow_html=True)
         st.plotly_chart(
             hits_homers_figure(roster, club, hr_line, study.league_hits),
             width="stretch",
@@ -2909,173 +2878,43 @@ def contact_page() -> None:
         )
         st.html(_FACE_LIFT, unsafe_allow_javascript=True)
         st.caption(
-            "Left to right is the home-run count. Bottom to top is hits divided by balls in play. "
+            "Left to right is the home-run count. Bottom to top is the share of balls in play that became hits. "
             f"The vertical line is the median of the qualifiers, {hr_label} home runs. "
-            f"The horizontal line is the league share of balls that became hits, {study.league_hits:.3f}. "
+            f"The horizontal line is the league share, {study.league_hits * 100:.1f}%. "
             "A strikeout is not a ball in play, so it never moves a dot. "
             "A hitter can miss often and still land in the top right, because this chart only keeps the balls he hit."
         )
 
-    st.markdown('<p class="section-label">Above or below the launch</p>', unsafe_allow_html=True)
-    _prose("contact_quadrant", _buried_quadrant(study), "chapter")
-    st.plotly_chart(
-        contact_cross(roster, club, study.league_hits),
-        width="stretch",
-        config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
-    )
-    st.html(_FACE_LIFT, unsafe_allow_javascript=True)
-    st.dataframe(contact_corners(roster, club, study.league_hits), hide_index=True, width="stretch")
-    st.caption(
-        "All draws one face where two would cover each other. The rest stay dots. "
-        "A team shows every qualifier, and the face under the cursor draws in front."
-    )
-
-    table_source = roster if club is None else roster.loc[roster["club"].eq(club)]
-    if club is not None:
-        table_source = table_source.sort_values("gap", key=lambda column: column.abs(), ascending=False)
-    show = (table_source.head(12) if club is None else table_source).loc[
-        :, ["name", "club", "bip", "hit_rate", "singles", "doubles", "triples", "homers", "actual", "model", "savant", "gap"]
-    ].copy()
-    show.columns = ["Hitter", "Team", "Balls", "Hits per ball", "1B", "2B", "3B", "HR", "Results", "This model", "MLB expected", "Gap"]
-    for column in ("Hits per ball", "Results", "This model", "MLB expected", "Gap"):
-        show[column] = show[column].astype(float).round(3)
-    for column in ("1B", "2B", "3B", "HR"):
-        show[column] = show[column].astype(int)
-    st.dataframe(
-        show,
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Balls": st.column_config.NumberColumn(format="%d"),
-            "Hits per ball": st.column_config.NumberColumn(format="%.3f"),
-            "1B": st.column_config.NumberColumn(format="%d"),
-            "2B": st.column_config.NumberColumn(format="%d"),
-            "3B": st.column_config.NumberColumn(format="%d"),
-            "HR": st.column_config.NumberColumn(format="%d"),
-            "Results": st.column_config.NumberColumn(format="%.3f"),
-            "This model": st.column_config.NumberColumn(format="%.3f"),
-            "MLB expected": st.column_config.NumberColumn(format="%.3f"),
-            "Gap": st.column_config.NumberColumn(format="%+.3f"),
-        },
-    )
-    st.caption(
-        f"Hits per ball above {study.league_hits:.3f} beat the league share of balls in play that became hits. "
-        f"Results above {study.league_woba:.3f} beat the league weight. "
-        "1B, 2B, 3B, and HR are the season counts."
-    )
-
     forecast = _cached_forecast(str(RAW), RAW.stat().st_mtime_ns)
     st.markdown('<p class="section-label">Next season</p>', unsafe_allow_html=True)
     _prose("contact_forecast", _buried_forecast(forecast), "chapter")
-    if not forecast.steps.empty:
-        last_step = forecast.steps.iloc[-1]
-        coming = int(last_step.nxt) + 1
-        score_cols = st.columns(3)
-        score_cols[0].metric(f"{int(last_step.nxt)} from contact", f"{last_step.mae_contact:.3f}")
-        score_cols[1].metric(f"{int(last_step.nxt)} from results", f"{last_step.mae_results:.3f}")
-        score_cols[2].metric("Hitters in that test", f"{int(last_step.pairs)}")
-        st.caption(
-            f"Miss is the average distance between the guess and what those hitters actually did in {int(last_step.nxt)}, per ball in play. "
-            f"The test keeps hitters with at least {MIN_BALLS} balls in {int(last_step.prior)} who had at least {NEXT_BALLS} the next year."
+    coming = int(forecast.seasons[-1]) + 1 if forecast.seasons else 2026
+    board = forecast.board if club is None else forecast.board.loc[forecast.board["club"].eq(club)]
+    if board.empty:
+        st.markdown(
+            f'<p class="chapter">No hitter on {html.escape(choice)} reached {MIN_BALLS} balls for a {coming} guess.</p>',
+            unsafe_allow_html=True,
         )
-        board = forecast.board if club is None else forecast.board.loc[forecast.board["club"].eq(club)]
-        if board.empty:
-            st.markdown(
-                f'<p class="chapter">No hitter on {html.escape(choice)} reached {MIN_BALLS} balls for a {coming} guess.</p>',
-                unsafe_allow_html=True,
-            )
-        else:
-            st.plotly_chart(
-                forecast_figure(board, coming, club, forecast.league_hits),
-                width="stretch",
-                config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
-            )
-            st.html(_FACE_LIFT, unsafe_allow_javascript=True)
-            st.dataframe(forecast_corners(board, None, forecast.league_hits), hide_index=True, width="stretch")
-            rises = board.assign(rise=board["guess"] - board["actual"]).nlargest(3, "rise")
-            rise_bits = [f"{row['name']} ({row['rise']:+.3f})" for _, row in rises.iterrows() if row["rise"] > 0]
-            if len(rise_bits) == 1:
-                rise_list = rise_bits[0]
-            elif len(rise_bits) == 2:
-                rise_list = f"{rise_bits[0]} and {rise_bits[1]}"
-            else:
-                rise_list = ", ".join(rise_bits[:-1]) + f", and {rise_bits[-1]}" if rise_bits else ""
-            rise_sentence = f" The largest rises here are {rise_list}." if rise_list else ""
-            st.caption(
-                f"Right of center, the {coming} guess is higher than his {int(last_step.nxt)} results. "
-                f"Above center, last year's hits per ball beat the league share of {forecast.league_hits:.3f}. That height is last year, not the guess. "
-                f"A {coming} number under last year can still be a strong year. The league weight is {forecast.league_woba:.3f}."
-                f"{rise_sentence} "
-                "All keeps one face where two would cover each other. A team shows every face, and the one under the cursor draws in front."
-            )
-        show_guess = board.assign(change=board["guess"] - board["actual"]).loc[
-            :,
-            ["name", "club", "age", "bip", "hit_rate", "singles", "doubles", "triples", "homers", "contact", "actual", "park", "guess", "change"],
-        ].copy()
-        show_guess.columns = [
-            "Hitter",
-            "Team",
-            "Age",
-            "Balls",
-            "Hits per ball",
-            "1B",
-            "2B",
-            "3B",
-            "HR",
-            "Contact",
-            "Results",
-            "Park",
-            str(coming),
-            "Change",
-        ]
-        for column in ("Hits per ball", "Contact", "Results", "Park", str(coming), "Change"):
-            show_guess[column] = show_guess[column].astype(float).round(3)
-        for column in ("1B", "2B", "3B", "HR"):
-            show_guess[column] = show_guess[column].astype(int)
-        st.dataframe(
-            show_guess,
-            hide_index=True,
+    else:
+        st.plotly_chart(
+            forecast_figure(forecast.board, coming, club),
             width="stretch",
-            column_config={
-                "Age": st.column_config.NumberColumn(format="%d"),
-                "Balls": st.column_config.NumberColumn(format="%d"),
-                "Hits per ball": st.column_config.NumberColumn(format="%.3f"),
-                "1B": st.column_config.NumberColumn(format="%d"),
-                "2B": st.column_config.NumberColumn(format="%d"),
-                "3B": st.column_config.NumberColumn(format="%d"),
-                "HR": st.column_config.NumberColumn(format="%d"),
-                "Contact": st.column_config.NumberColumn(format="%.3f"),
-                "Results": st.column_config.NumberColumn(format="%.3f"),
-                "Park": st.column_config.NumberColumn(format="%+.3f"),
-                str(coming): st.column_config.NumberColumn(format="%.3f"),
-                "Change": st.column_config.NumberColumn(format="%+.3f"),
-            },
+            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
         )
+        st.html(_FACE_LIFT, unsafe_allow_javascript=True)
         st.caption(
-            f"{coming} uses last season's contact, pulled toward the league weight of {forecast.league_woba:.3f}. "
-            "More balls keep the guess closer to his own contact. "
-            f"Change is that guess minus the {int(last_step.nxt)} results. "
-            f"A negative change on a number above {forecast.league_woba:.3f} is a strong year that comes off a higher one. "
-            "Park is the extra weight of balls hit in his home park. "
-            f"Age is opening day {coming}. "
-            "Hits per ball, singles, doubles, triples, and home runs describe last season."
+            f"Left to right is the {coming} guess from exit velocity and launch angle across the seasons in the file. "
+            f"Bottom to top is the {coming - 1} result. "
+            "The dotted line is where those two numbers match. "
+            "Above it, the season ran ahead of the swings. Under it, the season came in light of them."
         )
-
-    st.markdown('<p class="section-label">Still open</p>', unsafe_allow_html=True)
-    _prose(
-        "contact_open",
-        f"The file scored here is {study.train_label}, then {study.test_label}. "
-        "The full paper wants every Statcast season from 2015 on, trained on the earlier years and scored on a later year. "
-        "Walks and strikeouts stay out of this fit. The number is contact value per ball in play. "
-        "Park factors are a later paper on this same file: how much of a park's home-run gap remains after exit velocity and launch angle. "
-        "Pitcher velocity is a different cut of Statcast. That one keeps every pitch, not just the balls in play.",
-        "chapter",
-    )
+    _prose("contact_forecast_read", "", "chapter")
 
 
 @st.cache_data(show_spinner="Building the season guesses...")
 def _cached_forecast(path: str, mtime_ns: int) -> ForecastReport:
     del mtime_ns
+    # Swing guess blends several seasons of contact. Age is not in the guess.
     columns = ["season", "batter", "home_team", "events", "woba_value", "estimated_woba_using_speedangle"]
     return build_forecast(pandas.read_parquet(path, columns=columns))  # hit counts on the guess board
 
