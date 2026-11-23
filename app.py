@@ -262,6 +262,89 @@ div[data-testid="stMarkdownContainer"]:has(.mast) {
   line-height: 1.45;
   text-align: left;
 }
+.gloss {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.4rem;
+  margin: 0.55rem 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.25;
+}
+.gloss-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 0.35rem 1.15rem;
+  min-height: 2.4rem;
+}
+.gloss-row .gloss {
+  margin: 0;
+}
+.gloss-row .gloss > span:first-child {
+  width: auto;
+}
+.gloss-row .qmark .tip {
+  top: 1.25rem;
+  right: 0;
+  transform: none;
+}
+.qmark {
+  position: relative;
+  flex: 0 0 auto;
+  width: 0.95rem;
+  height: 0.95rem;
+  border: 1px solid var(--gold);
+  border-radius: 50%;
+  color: var(--gold);
+  font-size: 0.62rem;
+  line-height: 0.85rem;
+  text-align: center;
+  cursor: help;
+}
+.qmark input {
+  appearance: none;
+  -webkit-appearance: none;
+  opacity: 0;
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  cursor: help;
+}
+.qmark .tip {
+  display: none;
+  position: absolute;
+  right: 1.35rem;
+  top: 50%;
+  transform: translateY(-40%);
+  width: 16rem;
+  padding: 0.55rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #2a303a;
+  color: var(--ink);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  text-align: left;
+  z-index: 30;
+}
+.qmark:hover .tip,
+.qmark:focus-within .tip,
+.qmark input:checked ~ .tip {
+  display: block;
+}
+[data-testid="stElementContainer"]:has(.gloss),
+[data-testid="stVerticalBlock"]:has(.gloss) {
+  overflow: visible;
+}
+[data-testid="stColumn"]:has(.gloss),
+[data-testid="stHorizontalBlock"]:has(.gloss) {
+  position: relative;
+  z-index: 4;
+  overflow: visible;
+}
 .chapter.lead {
   margin-top: 1.85rem !important;
 }

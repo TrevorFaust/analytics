@@ -888,10 +888,8 @@ def _hitter_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
     club = frame["club"] if "club" in frame.columns else pandas.Series("", index=frame.index)
     custom = numpy.column_stack(
         [
-            frame["savant"].to_numpy(),
-            frame["bip"].to_numpy(),
-            frame["gap"].to_numpy(),
             club.fillna("").to_numpy(),
+            frame["bip"].to_numpy(),
             frame["hit_rate"].to_numpy(),
             frame["singles"].to_numpy(),
             frame["doubles"].to_numpy(),
@@ -900,11 +898,12 @@ def _hitter_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
         ]
     )
     template = (
-        "%{text}<br>%{customdata[3]}<br>This model %{x:.3f}<br>Results %{y:.3f}"
-        "<br>MLB expected %{customdata[0]:.3f}<br>Gap %{customdata[2]:+.3f}"
-        "<br>Hits per ball %{customdata[4]:.3f}"
-        "<br>%{customdata[5]:.0f} singles, %{customdata[6]:.0f} doubles, %{customdata[7]:.0f} triples, %{customdata[8]:.0f} HR"
-        "<br>%{customdata[1]:.0f} balls<extra></extra>"
+        "%{text}<br>%{customdata[0]}"
+        "<br>True result %{y:.3f}"
+        "<br>Model prediction %{x:.3f}"
+        "<br>Hit rate %{customdata[2]:.1%}"
+        "<br>%{customdata[3]:.0f} singles, %{customdata[4]:.0f} doubles, %{customdata[5]:.0f} triples, %{customdata[6]:.0f} home runs"
+        "<br>%{customdata[1]:.0f} balls in play<extra></extra>"
     )
     return custom, template
 
@@ -924,7 +923,7 @@ def hitter_figure(hitters: pandas.DataFrame, club: str | None = None) -> go.Figu
             x=[line_lo, line_hi],
             y=[line_lo, line_hi],
             mode="lines",
-            name="Results match the model",
+            name="Prediction matches the result",
             line=dict(color="#b7b2a4", width=1, dash="dot"),
             hoverinfo="skip",
         )
@@ -969,14 +968,14 @@ def hitter_figure(hitters: pandas.DataFrame, club: str | None = None) -> go.Figu
     layout["hovermode"] = "closest"
     figure.update_layout(**layout)
     figure.update_xaxes(
-        title="Model's contact value, per ball",
+        title="Model prediction, per ball",
         range=[x0, x1],
         tickfont=dict(color="#d9d3c5"),
         gridcolor="#3a4150",
         autorange=False,
     )
     figure.update_yaxes(
-        title="What actually happened, per ball",
+        title="True result, per ball",
         range=[y0, y1],
         tickfont=dict(color="#d9d3c5"),
         gridcolor="#3a4150",
@@ -1186,6 +1185,226 @@ def _corner_counts(
             high_col: [int((right & up).sum()), int((~right & up).sum())],
             low_col: [int((right & ~up).sum()), int((~right & ~up).sum())],
         }
+    )
+
+
+def _marked_layout(
+    frame: pandas.DataFrame,
+    club: str | None,
+    x_col: str,
+    y_col: str,
+    x_mark: float,
+    y_mark: float,
+) -> tuple[pandas.DataFrame, pandas.DataFrame, tuple[float, float, float, float, float, float] | None]:
+    """Faces for the hitters farthest from the cross, in the units of the chart."""
+    pool = frame if not club else frame.loc[frame["club"].eq(club)].copy()
+    pool = pool.dropna(subset=[x_col, y_col])
+    if pool.empty:
+        return pool, pool.iloc[0:0], None
+    xmin = float(pool[x_col].min())
+    xmax = float(pool[x_col].max())
+    ymin = float(pool[y_col].min())
+    ymax = float(pool[y_col].max())
+    xspan = max(xmax - xmin, 1.0)
+    yspan = max(ymax - ymin, 0.02)
+    slots = 8 if club else 14
+    face_x = xspan / slots
+    face_y = yspan / slots
+    pad_x = max(xspan * 0.08, face_x * 0.55)
+    pad_y = max(yspan * 0.10, face_y * 0.55)
+    if club:
+        faces = pool.sort_values(x_col)
+        dots = pool.iloc[0:0]
+    else:
+        dx = (pool[x_col] - x_mark) / xspan
+        dy = (pool[y_col] - y_mark) / yspan
+        score = pandas.Series(numpy.hypot(dx.to_numpy(), dy.to_numpy()), index=pool.index)
+        faces = _keep_one_face(pool, x_col, y_col, face_x, face_y, score)
+        dots = pool.loc[~pool["batter"].isin(set(faces["batter"]))].copy()
+    bounds = (xmin - pad_x, xmax + pad_x, ymin - pad_y, ymax + pad_y, face_x, face_y)
+    return faces, dots, bounds
+
+
+def _marked_figure(
+    frame: pandas.DataFrame,
+    club: str | None,
+    x_col: str,
+    y_col: str,
+    x_mark: float,
+    y_mark: float,
+    x_title: str,
+    y_title: str,
+    corners: tuple[str, str, str, str],
+    hover_fn,
+    x_digits: int,
+    y_digits: int,
+) -> go.Figure:
+    faces, dots, bounds = _marked_layout(frame, club, x_col, y_col, x_mark, y_mark)
+    figure = go.Figure()
+    if bounds is None:
+        figure.update_layout(**chart_layout(420))
+        return figure
+    x0, x1, y0, y1, face_x, face_y = bounds
+    figure.add_hline(y=y_mark, line_width=1, line_color="#6a6458")
+    figure.add_vline(x=x_mark, line_width=1, line_color="#6a6458")
+    spots = (
+        (0.99, 0.98, "right", "top", corners[0]),
+        (0.01, 0.98, "left", "top", corners[1]),
+        (0.99, 0.02, "right", "bottom", corners[2]),
+        (0.01, 0.02, "left", "bottom", corners[3]),
+    )
+    for x, y, xanchor, yanchor, text in spots:
+        figure.add_annotation(
+            xref="paper",
+            yref="paper",
+            x=x,
+            y=y,
+            xanchor=xanchor,
+            yanchor=yanchor,
+            text=text,
+            showarrow=False,
+            font=dict(size=12, color="#b7b2a4"),
+        )
+    if not dots.empty:
+        custom, template = hover_fn(dots)
+        figure.add_trace(
+            go.Scatter(
+                x=dots[x_col],
+                y=dots[y_col],
+                mode="markers",
+                name="Other hitters",
+                marker=dict(size=7, color="#8d8474", opacity=0.9, line=dict(width=0)),
+                text=dots["name"],
+                customdata=custom,
+                hovertemplate=template,
+            )
+        )
+    images, faced = _stamp_faces(faces, x_col, y_col, face_x, face_y)
+    if not faced.empty:
+        custom, template = hover_fn(faced)
+        figure.add_trace(
+            go.Scatter(
+                x=faced[x_col],
+                y=faced[y_col],
+                mode="markers",
+                name="Hitters",
+                marker=dict(
+                    size=42 if club else 28,
+                    color="rgba(0,0,0,0)",
+                    line=dict(width=0, color="rgba(0,0,0,0)"),
+                ),
+                showlegend=False,
+                text=faced["name"],
+                customdata=custom,
+                hovertemplate=template,
+            )
+        )
+    layout = chart_layout(680)
+    layout["margin"] = dict(l=64, r=24, t=28, b=52)
+    layout["images"] = images
+    layout["hovermode"] = "closest"
+    figure.update_layout(**layout)
+    axis = dict(tickfont=dict(color="#d9d3c5"), gridcolor="#3a4150", zeroline=False, autorange=False)
+    x_format = f".{x_digits}f" if x_digits else "d"
+    y_format = f".{y_digits}f" if y_digits else "d"
+    figure.update_xaxes(title=x_title, range=[x0, x1], tickformat=x_format, **axis)
+    figure.update_yaxes(title=y_title, range=[y0, y1], tickformat=y_format, **axis)
+    return figure
+
+
+def _swing_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
+    club = frame["club"] if "club" in frame.columns else pandas.Series("", index=frame.index)
+    custom = numpy.column_stack(
+        [
+            club.fillna("").to_numpy(),
+            frame["ev"].to_numpy(),
+            frame["la"].to_numpy(),
+            frame["hit_rate"].to_numpy(),
+            frame["homers"].to_numpy(),
+            frame["bip"].to_numpy(),
+            frame["singles"].to_numpy(),
+            frame["doubles"].to_numpy(),
+            frame["triples"].to_numpy(),
+            frame["actual"].to_numpy(),
+        ]
+    )
+    template = (
+        "%{text}<br>%{customdata[0]}"
+        "<br>%{customdata[1]:.1f} mph, %{customdata[2]:.1f} degrees"
+        "<br>Hits per ball %{customdata[3]:.3f}"
+        "<br>%{customdata[4]:.0f} home runs on %{customdata[5]:.0f} balls"
+        "<br>%{customdata[6]:.0f} singles, %{customdata[7]:.0f} doubles, %{customdata[8]:.0f} triples"
+        "<br>Results %{customdata[9]:.3f}<extra></extra>"
+    )
+    return custom, template
+
+
+def power_pop_figure(hitters: pandas.DataFrame, club: str | None, ev_line: float, la_line: float) -> go.Figure:
+    return _marked_figure(
+        hitters,
+        club,
+        "ev",
+        "la",
+        ev_line,
+        la_line,
+        "Average exit velocity, mph",
+        "Average launch angle, degrees",
+        (
+            "Harder, higher path",
+            "Softer, higher path",
+            "Harder, flatter path",
+            "Softer, flatter path",
+        ),
+        _swing_hover,
+        0,
+        0,
+    )
+
+
+def _production_hover(frame: pandas.DataFrame) -> tuple[numpy.ndarray, str]:
+    club = frame["club"] if "club" in frame.columns else pandas.Series("", index=frame.index)
+    custom = numpy.column_stack(
+        [
+            club.fillna("").to_numpy(),
+            frame["homers"].to_numpy(),
+            frame["hit_rate"].to_numpy(),
+            frame["bip"].to_numpy(),
+            frame["singles"].to_numpy(),
+            frame["doubles"].to_numpy(),
+            frame["triples"].to_numpy(),
+            frame["actual"].to_numpy(),
+        ]
+    )
+    template = (
+        "%{text}<br>%{customdata[0]}"
+        "<br>%{customdata[1]:.0f} home runs"
+        "<br>Hits per ball %{customdata[2]:.3f}"
+        "<br>%{customdata[4]:.0f} singles, %{customdata[5]:.0f} doubles, %{customdata[6]:.0f} triples"
+        "<br>%{customdata[3]:.0f} balls in play"
+        "<br>Results %{customdata[7]:.3f}<extra></extra>"
+    )
+    return custom, template
+
+
+def hits_homers_figure(hitters: pandas.DataFrame, club: str | None, hr_line: float, league_hits: float) -> go.Figure:
+    return _marked_figure(
+        hitters,
+        club,
+        "homers",
+        "hit_rate",
+        hr_line,
+        league_hits,
+        "Home runs",
+        "Hits per ball in play",
+        (
+            "More home runs, more hits",
+            "Fewer home runs, more hits",
+            "More home runs, fewer hits",
+            "Fewer home runs, fewer hits",
+        ),
+        _production_hover,
+        0,
+        3,
     )
 
 
@@ -1509,20 +1728,300 @@ def _zone_board(hits: pandas.DataFrame, everything: pandas.DataFrame, top: float
         )
 
 
-def _gap_sentence(hitters: pandas.DataFrame) -> str:
-    top = hitters.head(3)
-    if top.empty:
-        return f"No hitter in the holdout has {MIN_BALLS} balls in play yet."
-    bits = [f"{row['name']} ({row['gap']:+.3f})" for _, row in top.iterrows()]
-    if len(bits) == 1:
-        listed = bits[0]
-    elif len(bits) == 2:
-        listed = f"{bits[0]} and {bits[1]}"
+@st.cache_data(show_spinner=False)
+def _launch_profile(path: str, mtime_ns: int) -> pandas.DataFrame:
+    """Mean exit velocity for each hitter in the scored season."""
+    del mtime_ns
+    balls = pandas.read_parquet(path, columns=["season", "game_date", "batter", "launch_speed", "launch_angle"])
+    _train, test, _train_label, _test_label = _split(balls)
+    test = test.dropna(subset=["launch_speed"]).copy()
+    test["batter"] = pandas.to_numeric(test["batter"], errors="coerce").astype("int64")
+    return test.groupby("batter", as_index=False).agg(
+        ev=("launch_speed", "mean"),
+        ev_sum=("launch_speed", "sum"),
+        n=("launch_speed", "size"),
+        la=("launch_angle", "mean"),
+    )
+
+
+def _hitter_row(hitters: pandas.DataFrame, name: str) -> pandas.Series | None:
+    rows = hitters.loc[hitters["name"].str.lower().eq(name.lower())]
+    if rows.empty:
+        return None
+    return rows.iloc[0]
+
+
+def _rank_of(hitters: pandas.DataFrame, row: pandas.Series, column: str) -> int:
+    return int(hitters[column].gt(row[column]).sum()) + 1
+
+
+def _ord(number: int) -> str:
+    number = int(number)
+    if 10 <= number % 100 <= 20:
+        suffix = "th"
     else:
-        listed = f"{bits[0]}, {bits[1]}, and {bits[2]}"
+        suffix = {1: "st", 2: "nd", 3: "rd"}.get(number % 10, "th")
+    return f"{number}{suffix}"
+
+
+def _place_word(number: int) -> str:
+    return {1: "first", 2: "second", 3: "third", 4: "fourth"}.get(int(number), _ord(number))
+
+
+def _tied_place(hitters: pandas.DataFrame, row: pandas.Series, column: str) -> str:
+    word = _place_word(_rank_of(hitters, row, column))
+    if int(hitters[column].eq(row[column]).sum()) > 1:
+        return f"tied for {word}"
+    return word
+
+
+def _weight(value: float) -> str:
+    return f"{value:.3f}"
+
+
+def _share(value: float) -> str:
+    return f"{value * 100:.1f}%"
+
+
+def _four_rows(hitters: pandas.DataFrame) -> dict[str, pandas.Series] | None:
+    names = ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers")
+    rows = {name: _hitter_row(hitters, name) for name in names}
+    if any(row is None for row in rows.values()):
+        return None
+    return rows
+
+
+def _buried_hitters(study: ContactStudy) -> str:
+    roster = _attach_clubs(study.hitters)
+    rows = _four_rows(roster)
+    if rows is None:
+        return (
+            "The face is the hitter, with the gray studio backdrop taken off. "
+            "A face above the line beat the contact. A face under the line did less with it than the launch said."
+        )
+    judge, ohtani, kurtz, stowers = (rows[name] for name in ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers"))
+    raleigh = _hitter_row(roster, "Cal Raleigh")
+    schwarber = _hitter_row(roster, "Kyle Schwarber")
+    qualifiers = len(roster)
+    lead = ""
+    if raleigh is not None and schwarber is not None:
+        lead = (
+            f"I lined up the {qualifiers} hitters who put {MIN_BALLS} balls in play, and I started with home runs, "
+            f"the column a box score leads with. {raleigh['name']} had {int(raleigh['homers'])}. "
+            f"{schwarber['name']} had {int(schwarber['homers'])}. "
+            f"Ohtani had {int(ohtani['homers'])} and Judge had {int(judge['homers'])}. "
+            f"Kurtz hit {int(kurtz['homers'])}, {_tied_place(roster, kurtz, 'homers')}. "
+            f"Stowers hit {int(stowers['homers'])}, {_tied_place(roster, stowers, 'homers')}.\n\n"
+        )
     return (
-        f"The widest gaps, among hitters with at least {MIN_BALLS} balls, are {listed}. "
-        "A positive number means this model values the contact higher than MLB's expected weight does."
+        f"{lead}"
+        f"Sorted by the weight of each ball, the order changes. "
+        f"Judge is {_place_word(_rank_of(roster, judge, 'actual'))} at {_weight(judge['actual'])}. "
+        f"Kurtz is {_place_word(_rank_of(roster, kurtz, 'actual'))} at {_weight(kurtz['actual'])}, on {int(kurtz['bip'])} balls. "
+        f"Ohtani is {_place_word(_rank_of(roster, ohtani, 'actual'))} at {_weight(ohtani['actual'])}. "
+        f"Stowers is {_place_word(_rank_of(roster, stowers, 'actual'))} at {_weight(stowers['actual'])}, on {int(stowers['bip'])} balls."
+    )
+
+
+def _face_note(roster: pandas.DataFrame, stowers: pandas.Series) -> str:
+    faces, _dots, bounds = _hitter_layout(roster, None)
+    if bounds is None:
+        return ""
+    _x0, _x1, _y0, _y1, face_x, face_y = bounds
+    if int(stowers["batter"]) in set(faces["batter"].astype(int)):
+        return "Stowers has a face on the full chart."
+    near = faces.loc[
+        (faces["model"] - stowers["model"]).abs().lt(face_x)
+        & (faces["actual"] - stowers["actual"]).abs().lt(face_y)
+    ]
+    if near.empty:
+        return f"On the full chart Stowers stays a dot. Choose {stowers['club']} and his face comes up."
+    cover = near.iloc[0]
+    return (
+        f"On the full chart Stowers stays a dot, because {cover['name']}'s face sits on that spot. "
+        f"Choose {stowers['club']} and the dot becomes Stowers."
+    )
+
+
+def _buried_scale(study: ContactStudy) -> str:
+    roster = _attach_clubs(study.hitters)
+    rows = _four_rows(roster)
+    if rows is None:
+        return (
+            f"Results, this model, and MLB expected are the weight of each ball, averaged over the balls he put in play. "
+            f"The league on the scored balls is {study.league_woba:.3f}."
+        )
+    judge, ohtani, kurtz, stowers = (rows[name] for name in ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers"))
+    profile = _launch_profile(str(RAW), RAW.stat().st_mtime_ns)
+    speeds = []
+    for row in (judge, ohtani, kurtz, stowers):
+        match = profile.loc[profile["batter"].eq(int(row["batter"]))]
+        speeds.append(None if match.empty else float(match.iloc[0]["ev"]))
+    qualifiers = profile.loc[profile["batter"].isin(set(roster["batter"].astype(int)))]
+    mean_ev = None
+    if not qualifiers.empty and float(qualifiers["n"].sum()) > 0:
+        mean_ev = float(qualifiers["ev_sum"].sum() / qualifiers["n"].sum())
+    speed_line = ""
+    if all(speed is not None for speed in speeds) and mean_ev is not None:
+        judge_ev, ohtani_ev, kurtz_ev, stowers_ev = speeds
+        speed_line = (
+            f" Judge's balls left the bat at {judge_ev:.1f} mph, and Ohtani's at {ohtani_ev:.1f}. "
+            f"Kurtz was at {kurtz_ev:.1f}. Stowers was at {stowers_ev:.1f}. "
+            f"The balls from all {len(roster)} qualifiers averaged {mean_ev:.1f} mph."
+        )
+    raleigh = _hitter_row(roster, "Cal Raleigh")
+    fifth = ""
+    at_least = int(roster["actual"].ge(0.5).sum())
+    if raleigh is not None and at_least == 5 and float(raleigh["actual"]) >= 0.5:
+        homer_place = _place_word(_rank_of(roster, raleigh, "homers"))
+        homer_bit = "the home run lead" if homer_place == "first" else f"{homer_place} in home runs"
+        fifth = (
+            f" {raleigh['name']} is the fifth, at {_weight(raleigh['actual'])}, "
+            f"with {homer_bit} and a lower weight per ball than Stowers."
+        )
+    count_word = "Five" if at_least == 5 else str(at_least)
+    group_line = ""
+    if all(float(row["actual"]) >= 0.5 for row in (judge, ohtani, kurtz, stowers)):
+        group_line = (
+            f"{count_word} qualifiers finished at 0.500 or higher, and these four are part of that group.{fifth} "
+        )
+    return (
+        f"The chart below is that sort, one mark per hitter. "
+        f"Left to right is the weight the trees gave the launch. Bottom to top is the weight the plays returned. "
+        f"The dotted line is a match. "
+        f"Judge is the face in the far corner: the launch said {_weight(judge['model'])} and the plays came back at {_weight(judge['actual'])}. "
+        f"Ohtani is the next face over, called {_weight(ohtani['model'])} and returned {_weight(ohtani['actual'])}. "
+        f"Kurtz's face is nearly as high as Judge's and sits left of Ohtani. "
+        f"His launch was {_weight(kurtz['model'])}, {_place_word(_rank_of(roster, kurtz, 'model'))} among {len(roster)}, and the results were {_weight(kurtz['actual'])}. "
+        f"Stowers lands at a launch of {_weight(stowers['model'])} and results of {_weight(stowers['actual'])}. "
+        f"{_face_note(roster, stowers)}\n\n"
+        f"Those decimals are the weight of each ball in play. "
+        f"An out is 0. A single is 0.9. A double is 1.25. A triple is 1.6. A home run is 2. "
+        f"The league on the scored balls is {_weight(study.league_woba)}. "
+        f"{group_line}"
+        f"Judge got to {_weight(judge['actual'])} on {int(judge['bip'])} balls: "
+        f"{int(judge['singles'])} singles, {int(judge['doubles'])} doubles, {int(judge['triples'])} triples, and {int(judge['homers'])} home runs. "
+        f"Kurtz, on {int(kurtz['bip'])} balls, had {int(kurtz['singles'])} singles, {int(kurtz['doubles'])} doubles, "
+        f"{int(kurtz['triples'])} triples, and {int(kurtz['homers'])} home runs. "
+        f"Stowers had {int(stowers['singles'])} singles, {int(stowers['doubles'])} doubles, {int(stowers['triples'])} triples, "
+        f"and {int(stowers['homers'])} home runs on {int(stowers['bip'])} balls."
+        f"{speed_line}\n\n"
+        f"Hits per ball divides hits by balls in play. "
+        f"A published batting average divides hits by at-bats, and at-bats include the strikeouts this file never sees. "
+        f"{_share(judge['hit_rate'])} of Judge's balls became hits. "
+        f"{_share(kurtz['hit_rate'])} of Kurtz's did. "
+        f"{_share(stowers['hit_rate'])} of Stowers' did. "
+        f"{_share(ohtani['hit_rate'])} of Ohtani's did. "
+        f"The league share is {_share(study.league_hits)}."
+    )
+
+
+def _buried_quadrant(study: ContactStudy) -> str:
+    roster = _attach_clubs(study.hitters)
+    rows = _four_rows(roster)
+    beat = roster["actual"] - roster["model"]
+    edge = roster["hit_rate"] - float(study.league_hits)
+    right = beat.ge(0)
+    up = edge.ge(0)
+    high_hits = int((right & up).sum())
+    high_short = int((~right & up).sum())
+    low_hits = int((right & ~up).sum())
+    low_short = int((~right & ~up).sum())
+    if rows is None:
+        return (
+            f"Right of center, his results beat this model. Left of center, the launch was worth more than the results. "
+            f"Above center, more of his balls became hits than the league share of {study.league_hits:.3f}."
+        )
+    judge, ohtani, kurtz, stowers = (rows[name] for name in ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers"))
+    shortfalls = {
+        "Ohtani": float(ohtani["model"] - ohtani["actual"]),
+        "Judge": float(judge["model"] - judge["actual"]),
+        "Stowers": float(stowers["model"] - stowers["actual"]),
+        "Kurtz": float(kurtz["model"] - kurtz["actual"]),
+    }
+    widest = max(shortfalls, key=shortfalls.get)
+    ohtani_gap = f"Ohtani's results came back {_weight(shortfalls['Ohtani'])} under the launch"
+    if widest == "Ohtani":
+        ohtani_gap += ", the widest shortfall of the four"
+    judge_hits = (
+        f"Judge's hit rate leads the file at {_share(judge['hit_rate'])}"
+        if _rank_of(roster, judge, "hit_rate") == 1
+        else f"Judge's hit rate is {_place_word(_rank_of(roster, judge, 'hit_rate'))} at {_share(judge['hit_rate'])}"
+    )
+    corner = roster.loc[right & up]
+    kurtz_corner = ""
+    if not corner.empty and int(corner.loc[corner["actual"].idxmax(), "batter"]) == int(kurtz["batter"]):
+        kurtz_corner = f" His results are the highest of the {high_hits} in that corner."
+    return (
+        f"The cross splits the same {len(roster)} seasons. "
+        f"Right of center, the results beat the launch. Left of center, the launch was worth more than the plays that followed. "
+        f"Above center, he beat the league hit rate of {_share(study.league_hits)}. Below center, fewer of his balls became hits.\n\n"
+        f"Judge, Ohtani, and Stowers land left and above. "
+        f"{ohtani_gap}, "
+        f"with a hit on {_share(ohtani['hit_rate'])} of his balls, {_place_word(_rank_of(roster, ohtani, 'hit_rate'))} in the file. "
+        f"{judge_hits}, "
+        f"and the plays finished {_weight(shortfalls['Judge'])} under his launch of {_weight(judge['model'])}. "
+        f"Stowers is {_weight(shortfalls['Stowers'])} under his own launch, close to the center line, "
+        f"with a hit on {_share(stowers['hit_rate'])} of balls, {_place_word(_rank_of(roster, stowers, 'hit_rate'))} in the file.\n\n"
+        f"Kurtz is the face on the right. The results beat his launch by {_weight(kurtz['actual'] - kurtz['model'])}, "
+        f"and {_share(kurtz['hit_rate'])} of his balls became hits, {_place_word(_rank_of(roster, kurtz, 'hit_rate'))} in the file. "
+        f"{high_hits} qualifiers sit in that corner.{kurtz_corner} "
+        f"The launch had already placed him {_place_word(_rank_of(roster, kurtz, 'model'))}, at {_weight(kurtz['model'])}, on {int(kurtz['bip'])} balls. "
+        f"The count under the chart is the full split: {high_short} up and to the left, {high_hits} up and to the right, "
+        f"{low_short} down and to the left, and {low_hits} down and to the right.\n\n"
+        "The table under that count is a separate cut. "
+        "Gap is this model minus MLB's expected weight. On All, the rows are the widest of those disagreements."
+    )
+
+
+def _buried_forecast(report: ForecastReport) -> str:
+    if report.steps.empty or report.board.empty:
+        return _forecast_prose(report)
+    board = report.board
+    wanted = ("Aaron Judge", "Shohei Ohtani", "Nick Kurtz", "Kyle Stowers")
+    rows = {name: _hitter_row(board, name) for name in wanted}
+    if any(row is None for row in rows.values()):
+        return _forecast_prose(report)
+    judge, ohtani, kurtz, stowers = (rows[name] for name in wanted)
+    last = report.steps.iloc[-1]
+    coming = int(last.nxt) + 1
+
+    def age_bit(row: pandas.Series) -> str:
+        if pandas.isna(row["age"]):
+            return ""
+        return f" He is {int(row['age'])} on opening day."
+
+    kurtz_drop = float(kurtz["actual"] - kurtz["guess"])
+    drop_line = ""
+    if kurtz_drop > float(judge["actual"] - judge["guess"]) and kurtz_drop > float(ohtani["actual"] - ohtani["guess"]):
+        drop_line = "Kurtz drops farther than either of them. "
+    kurtz_subject = "His" if drop_line else "Kurtz's"
+    above_league = all(float(row["guess"]) > float(report.league_woba) for row in (judge, ohtani, kurtz, stowers))
+    under_last = all(float(row["guess"]) < float(row["actual"]) for row in (judge, ohtani, kurtz, stowers))
+    closing = ""
+    if above_league and under_last:
+        closing = (
+            f"Each of those guesses sits under the {int(last.nxt)} results and above the league weight of {_weight(report.league_woba)}."
+        )
+
+    return (
+        f"Contact from {int(last.prior)}, pulled toward the league, missed {int(last.nxt)} by {last.mae_contact:.3f} "
+        f"across {int(last.pairs)} hitters. Carrying the results forward missed by {last.mae_results:.3f}. "
+        f"The {coming} guess uses that same pull. It starts from the contact stored on each ball and draws it toward "
+        f"the league weight of {_weight(report.league_woba)}. More balls keep a hitter closer to his own contact.\n\n"
+        f"Judge's stored contact was {_weight(judge['contact'])}, so the guess comes out at {_weight(judge['guess'])}, "
+        f"{_place_word(_rank_of(board, judge, 'guess'))} on the board.{age_bit(judge)} "
+        f"Ohtani's contact was {_weight(ohtani['contact'])} and the guess is {_weight(ohtani['guess'])}, "
+        f"{_place_word(_rank_of(board, ohtani, 'guess'))}.{age_bit(ohtani)} "
+        f"Both sit under their {int(last.nxt)} results, which puts them left of center. "
+        f"The height is last year's hit rate, so both stay in the upper half.\n\n"
+        f"{drop_line}{kurtz_subject} results were {_weight(kurtz['actual'])} and the stored contact was "
+        f"{_weight(kurtz['contact'])}, on {int(kurtz['bip'])} balls, so the league takes a larger share of the guess. "
+        f"It comes out at {_weight(kurtz['guess'])}, {_ord(_rank_of(board, kurtz, 'guess'))}.{age_bit(kurtz)} "
+        f"His home park column is {kurtz['park']:+.3f}, and the guess leaves that out. "
+        f"Stowers goes from results of {_weight(stowers['actual'])} to a guess of {_weight(stowers['guess'])}, "
+        f"{_ord(_rank_of(board, stowers, 'guess'))}.{age_bit(stowers)} "
+        f"{closing}"
     )
 
 
@@ -2124,6 +2623,65 @@ def _guess_gap_copy(study: ContactStudy) -> str:
     )
 
 
+def _chart_key(roster: pandas.DataFrame, league_woba: float) -> None:
+    """Definitions next to the team picker. Hover or click the mark."""
+    row = _hitter_row(roster, "Nick Kurtz")
+    result_example = ""
+    model_example = ""
+    hit_example = ""
+    if row is not None:
+        hits = int(row["singles"] + row["doubles"] + row["triples"] + row["homers"])
+        balls = int(row["bip"])
+        result_example = (
+            f" Nick Kurtz's true result is {row['actual']:.3f}, "
+            f"the weights on his {balls} balls divided by {balls}."
+        )
+        model_example = (
+            f" Nick Kurtz's model prediction is {row['model']:.3f}. "
+            f"His true result is {row['actual']:.3f}, so the plays came back heavier than the guess."
+        )
+        hit_example = f" Nick Kurtz had {hits} hits in {balls} balls, {row['hit_rate'] * 100:.1f}%."
+    notes = (
+        (
+            "True result",
+            "The height of the dot. Each ball has a weight: an out is 0, a single is 0.9, a double is 1.25, "
+            "a triple is 1.6, and a home run is 2. Add the weights and divide by the balls he put in play. "
+            f"The league on every scored ball is {league_woba:.3f}. "
+            "A batting average divides hits by at-bats. This number is the average weight."
+            + result_example,
+        ),
+        (
+            "Model prediction",
+            "The left-to-right position. Your model scores each ball from its exit velocity and launch angle, "
+            "then those scores are averaged. The guess comes from how similar contact turned out in the earlier seasons."
+            + model_example,
+        ),
+        (
+            "Hit %",
+            "How often a ball in play became a hit. Hits divided by balls in play. "
+            "A single and a home run each count once. Strikeouts are not in the count."
+            + hit_example,
+        ),
+        (
+            "Dotted line",
+            "Where the true result equals the model prediction, the same number on both axes. "
+            "Above the line, the plays weighed more than the model guessed. "
+            "Under the line, the model guessed a heavier ball than the play returned.",
+        ),
+    )
+    rows = []
+    for label, body in notes:
+        rows.append(
+            '<div class="gloss">'
+            f"<span>{html.escape(label)}</span>"
+            '<label class="qmark">?'
+            f'<input type="checkbox" aria-label="{html.escape(label)}">'
+            f'<span class="tip">{html.escape(body)}</span>'
+            "</label></div>"
+        )
+    st.markdown(f'<div class="gloss-row">{"".join(rows)}</div>', unsafe_allow_html=True)
+
+
 def contact_page() -> None:
     st.html('<p class="back"><a href="/">Home</a></p>')
     if not RAW.exists():
@@ -2281,33 +2839,18 @@ def contact_page() -> None:
         '<p class="part-title">The bats the box score buried</p>',
         unsafe_allow_html=True,
     )
-    _prose("contact_gaps", _gap_sentence(study.hitters), "reading")
-    _prose(
-        "contact_hitters",
-        "The face is the hitter, with the gray studio backdrop taken off. "
-        "A face above the line beat the contact. A face under the line did less with it than the launch said. "
-        "All keeps a point for every hitter with 200 balls. Where two faces would cover each other, one face stays and the other hitter remains a dot. "
-        "Pick a team and every qualifier on that club gets a face. Hover one of those faces and that hitter draws in front.",
-        "chapter",
-    )
-    _prose(
-        "contact_scale",
-        f"Results, this model, and MLB expected are the weight of each ball, averaged over the balls he put in play. "
-        f"An out is 0. A single is about 0.9. A double is about 1.25. A home run is 2. "
-        f"The league on the scored balls is {study.league_woba:.3f}. Above that is a good contact year. Under it is a soft one. "
-        f"Hits per ball divides hits by balls in play. The league share is {study.league_hits:.3f}. "
-        f"A card batting average also counts strikeouts. This file starts after the ball is hit, so the two rates use different denominators. "
-        f"Singles, doubles, triples, and home runs are the counts for {study.test_label}. "
-        f"Exit velocity and launch angle move the model. Outs, singles, and extra-base hits move the results. "
-        "The gap is this model minus MLB expected.",
-        "chapter",
-    )
+    _prose("contact_hitters", _buried_hitters(study), "chapter")
+    _prose("contact_scale", _buried_scale(study), "chapter")
     st.markdown('<p class="section-label">Hitters, per ball in play</p>', unsafe_allow_html=True)
     roster = _attach_clubs(study.hitters)
+    launch = _launch_profile(str(RAW), RAW.stat().st_mtime_ns)
+    roster = roster.merge(launch.loc[:, ["batter", "ev", "la"]], on="batter", how="left")
     club_names = sorted({name for name in roster["club"].tolist() if name})
-    picker, _rest = st.columns([1, 2])
+    picker, key_col = st.columns([1.15, 3.4], vertical_alignment="center")
     with picker:
         choice = st.selectbox("Team", ["All", *club_names], key="contact_club")
+    with key_col:
+        _chart_key(roster, study.league_woba)
     club = None if choice == "All" else choice
     faces, dots, _bounds = _hitter_layout(roster, club)
     if faces.empty and dots.empty:
@@ -2338,16 +2881,43 @@ def contact_page() -> None:
             "A hitter who changed clubs is listed with the team they took the most balls with."
         )
 
+    shown = roster if club is None else roster.loc[roster["club"].eq(club)]
+    if not shown.empty:
+        swung = roster.dropna(subset=["ev", "la"])
+        ev_line = float(swung["ev"].mean())
+        la_line = float(swung["la"].mean())
+        hr_line = float(roster["homers"].median())
+        hr_label = f"{hr_line:.0f}" if abs(hr_line - round(hr_line)) < 0.05 else f"{hr_line:.1f}"
+        st.markdown('<p class="section-label">Power and lift</p>', unsafe_allow_html=True)
+        st.plotly_chart(
+            power_pop_figure(roster, club, ev_line, la_line),
+            width="stretch",
+            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+        )
+        st.html(_FACE_LIFT, unsafe_allow_javascript=True)
+        st.caption(
+            f"Each mark is that hitter's average on the balls he put in play. "
+            f"The cross is the average of the {len(swung)} qualifiers, {ev_line:.1f} mph and {la_line:.1f} degrees. "
+            "Right of the line is harder than that. Above it is a higher path. "
+            "The lines stay on the full list when a team is chosen."
+        )
+        st.markdown('<p class="section-label">Home runs and hits</p>', unsafe_allow_html=True)
+        st.plotly_chart(
+            hits_homers_figure(roster, club, hr_line, study.league_hits),
+            width="stretch",
+            config={"displayModeBar": False, "scrollZoom": False, "doubleClick": False},
+        )
+        st.html(_FACE_LIFT, unsafe_allow_javascript=True)
+        st.caption(
+            "Left to right is the home-run count. Bottom to top is hits divided by balls in play. "
+            f"The vertical line is the median of the qualifiers, {hr_label} home runs. "
+            f"The horizontal line is the league share of balls that became hits, {study.league_hits:.3f}. "
+            "A strikeout is not a ball in play, so it never moves a dot. "
+            "A hitter can miss often and still land in the top right, because this chart only keeps the balls he hit."
+        )
+
     st.markdown('<p class="section-label">Above or below the launch</p>', unsafe_allow_html=True)
-    _prose(
-        "contact_quadrant",
-        f"The cross is drawn through zero. "
-        f"Right of center, his results beat this model. Left of center, the launch was worth more than the results. "
-        f"Above center, more of his balls became hits than the league share of {study.league_hits:.3f}. Below center, fewer did. "
-        f"A home run and a single each count once in the hit rate, and the results count the home run as more weight, so a hitter can land in any corner. "
-        f"The count under the chart is how many qualifiers sit in each one.",
-        "chapter",
-    )
+    _prose("contact_quadrant", _buried_quadrant(study), "chapter")
     st.plotly_chart(
         contact_cross(roster, club, study.league_hits),
         width="stretch",
@@ -2396,7 +2966,7 @@ def contact_page() -> None:
 
     forecast = _cached_forecast(str(RAW), RAW.stat().st_mtime_ns)
     st.markdown('<p class="section-label">Next season</p>', unsafe_allow_html=True)
-    _prose("contact_forecast", _forecast_prose(forecast), "chapter")
+    _prose("contact_forecast", _buried_forecast(forecast), "chapter")
     if not forecast.steps.empty:
         last_step = forecast.steps.iloc[-1]
         coming = int(last_step.nxt) + 1
