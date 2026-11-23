@@ -1,6 +1,6 @@
 # Analytics
 
-The app opens on a subject index: baseball, basketball, football, and energy. Open a subject to see the projects inside it. Baseball holds a draft of the expected-contact model, fit on one season of balls in play and scored on the next. Basketball asks whether back-to-backs and home court change scoring efficiency. Football holds the penalties page, which walks regular-season flags from 1999 through the season still being played.
+The app opens on a subject index: baseball, basketball, football, and energy. Open a subject to see the projects inside it. Baseball holds a draft of the expected-contact model, fit on one season of balls in play and scored on the next. Basketball asks whether a back-to-back costs a team its shot, then follows that question into a few clubs and a few players. Football holds the penalties page, which walks regular-season flags from 1999 through the season still being played.
 
 ## Open it
 
@@ -50,9 +50,9 @@ The page is at http://localhost:8501/expected-contact. Month files sit in `data/
 
 ## Basketball
 
-The basketball page asks whether back-to-backs, extra rest, and home court change efficiency. It reads the team game log. A back-to-back is a game on the day after that club's previous game. True shooting pools every shot in the group. The first game of a season stays out of the rest charts. Home and road come from the matchup.
+The basketball page asks whether a back-to-back costs efficiency. It reads the team game log, then the player game log for a handful of named cases. A back-to-back is a game on the day after that club's previous game. For a player, a second night means he himself played the day before. True shooting pools every shot in the group. The first game of a season stays out of the rest charts. Home and road come from the matchup and show up in the text, without a chart of their own.
 
-The cache starts at 2021-22. Regular season only. A season with fewer than 400 team-games stays on disk and out of the pools. After the team split, the page cuts the same games by roster position, usual minutes, whether he played the night before, age, and usage. Those cuts use the player game log and the season roster. Shot-zone files stay season totals, so they are not split by rest.
+The cache starts at 2021-22. Regular season only. A season with fewer than 400 team-games stays on disk and out of the pools. Shot-zone files stay season totals, so they are not part of this story.
 
 ```
 .\.venv\Scripts\python.exe cache_nba_data.py

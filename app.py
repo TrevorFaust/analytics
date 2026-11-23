@@ -3553,8 +3553,8 @@ CATALOG = [
         "name": "Basketball",
         "projects": [
             {
-                "title": "Do back-to-backs and home court change efficiency?",
-                "dek": "True shooting by nights off, building, position, and minutes, since 2021-22.",
+                "title": "Do back-to-backs cost efficiency?",
+                "dek": "True shooting on the second night, for the clubs and for a few players, since 2021-22.",
                 "url_path": "nba-logs",
                 "render": nba_page,
             }

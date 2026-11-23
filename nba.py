@@ -496,11 +496,12 @@ def attach_players(logs: pandas.DataFrame, positions: pandas.DataFrame, advanced
     frame["USUAL_MINUTES"] = season_minutes.where(season_games >= ROLE_MIN_GAMES)
     frame["ROLE"] = frame["USUAL_MINUTES"].map(lambda value: None if pandas.isna(value) else role_label(float(value)))
 
+    frame["IS_B2B"] = frame["IS_B2B"].eq(True)
     known_team = frame["REST_LABEL"].notna()
     frame["APPEARANCE"] = pandas.Series(pandas.NA, index=frame.index, dtype="object")
     frame.loc[frame["PLAYED_YESTERDAY"], "APPEARANCE"] = APPEARANCE_ORDER[0]
-    frame.loc[~frame["PLAYED_YESTERDAY"] & frame["IS_B2B"].fillna(False), "APPEARANCE"] = APPEARANCE_ORDER[1]
-    frame.loc[~frame["PLAYED_YESTERDAY"] & known_team & ~frame["IS_B2B"].fillna(False), "APPEARANCE"] = APPEARANCE_ORDER[2]
+    frame.loc[~frame["PLAYED_YESTERDAY"] & frame["IS_B2B"], "APPEARANCE"] = APPEARANCE_ORDER[1]
+    frame.loc[~frame["PLAYED_YESTERDAY"] & known_team & ~frame["IS_B2B"], "APPEARANCE"] = APPEARANCE_ORDER[2]
     return frame
 
 
@@ -548,6 +549,71 @@ def rest_contrast(frame: pandas.DataFrame, column: str, order: list[str]) -> pan
             }
         )
     return pandas.DataFrame(rows)
+
+
+def own_rest_contrast(frame: pandas.DataFrame, column: str, order: list[str]) -> pandas.DataFrame:
+    """True shooting on a night he played yesterday, against a night with one day since his last game."""
+    rows = []
+    view = frame.loc[frame[column].notna() & frame["MIN"].fillna(0).gt(0)]
+    for label in order:
+        group = view.loc[view[column].eq(label)]
+        second = pooled_player(group.loc[group["PLAYED_YESTERDAY"]])
+        one = pooled_player(group.loc[group["PLAYER_REST"].eq(1)])
+        if not second or not one or second.get("ts") is None or one.get("ts") is None:
+            continue
+        rows.append(
+            {
+                "label": label,
+                "b2b_ts": second["ts"],
+                "rest_ts": one["ts"],
+                "ts_gap": second["ts"] - one["ts"],
+                "b2b_min": second["minutes"],
+                "rest_min": one["minutes"],
+                "b2b_games": second["games"],
+                "rest_games": one["games"],
+            }
+        )
+    return pandas.DataFrame(rows)
+
+
+def player_cases(frame: pandas.DataFrame, minimum_second: int = 30, minimum_rest: int = 50) -> pandas.DataFrame:
+    """Players with enough of their own back-to-backs and enough games on one day off."""
+    rows = []
+    view = frame.loc[frame["MIN"].fillna(0).gt(0)]
+    for player_id, group in view.groupby("PLAYER_ID", sort=False):
+        second = group.loc[group["PLAYED_YESTERDAY"]]
+        one = group.loc[group["PLAYER_REST"].eq(1)]
+        if len(second) < minimum_second or len(one) < minimum_rest:
+            continue
+        played_second = pooled_player(second)
+        rested = pooled_player(one)
+        if not played_second or not rested or played_second.get("ts") is None or rested.get("ts") is None:
+            continue
+        latest = group.sort_values(["GAME_DATE", "GAME_ID"]).iloc[-1]
+        clubs = group.groupby("TEAM_ABBREVIATION").size().sort_values(ascending=False)
+        rows.append(
+            {
+                "player_id": int(player_id),
+                "name": str(latest["PLAYER_NAME"]),
+                "club": str(clubs.index[0]),
+                "club_games": int(clubs.iloc[0]),
+                "games": int(len(group)),
+                "age": float(group["AGE"].median()),
+                "b2b_n": played_second["games"],
+                "rest_n": rested["games"],
+                "b2b_ts": played_second["ts"],
+                "rest_ts": rested["ts"],
+                "ts_gap": played_second["ts"] - rested["ts"],
+                "b2b_min": played_second["minutes"],
+                "rest_min": rested["minutes"],
+                "b2b_pm": played_second["margin"],
+                "rest_pm": rested["margin"],
+            }
+        )
+    cases = pandas.DataFrame(rows)
+    if cases.empty:
+        return cases
+    return cases.sort_values(["ts_gap", "name"], ascending=[True, True])
 
 
 def group_levels(frame: pandas.DataFrame, column: str, order: list[str]) -> pandas.DataFrame:
