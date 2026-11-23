@@ -5,7 +5,6 @@
 import fs from "node:fs";
 import https from "node:https";
 import crypto from "node:crypto";
-import { Agent } from "undici";
 
 const ORIGIN = "https://trevorfaust-analytics.streamlit.app";
 const RUNNING = 5;
@@ -14,7 +13,6 @@ const BOOT_MS = 3 * 60 * 1000;
 const SESSION_MS = 20 * 1000;
 
 const jar = new Map();
-const agent = new Agent({ keepAliveTimeout: 10, keepAliveMaxTimeout: 10 });
 
 function stamp() {
   const date = new Date();
@@ -40,7 +38,6 @@ async function finish(line, code) {
   if (log) fs.appendFileSync(log, text + "\n");
   console.log(text);
   process.exitCode = code;
-  await agent.close().catch(() => {});
 }
 
 function remember(response) {
@@ -72,7 +69,6 @@ async function call(path, options = {}) {
     method: options.method ?? "GET",
     headers,
     redirect: "manual",
-    dispatcher: agent,
   });
   remember(response);
   return response;
