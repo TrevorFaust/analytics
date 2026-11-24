@@ -66,12 +66,67 @@ def points(value: float) -> str:
     return f"{value:.1f}"
 
 
-def claim(text: str) -> None:
-    st.markdown(f'<p class="reading">{html.escape(text)}</p>', unsafe_allow_html=True)
+def claim(text: str, *, key: str) -> None:
+    from app import story_paragraph
+
+    story_paragraph(key, text, "reading")
 
 
-def walk(text: str) -> None:
-    st.markdown(f'<p class="chapter">{html.escape(text)}</p>', unsafe_allow_html=True)
+def walk(text: str, *, key: str) -> None:
+    from app import story_paragraph
+
+    story_paragraph(key, text, "chapter")
+
+
+def face_styles() -> None:
+    st.html(
+        """
+        <style>
+          [class*="st-key-face-clubs-warm"],
+          [class*="st-key-face-players-warm"] { display: none; }
+        </style>
+        """
+    )
+
+
+def face_bridge() -> None:
+    """The hot and cold switch lives in a frame. This keeps the matching paragraph in view."""
+    st.html(
+        """
+        <script>
+          var nbaFaces = {"nba-clubs-hot": "clubs", "nba-players-hot": "players"};
+          function applyNbaFace(id, hot) {
+            const name = nbaFaces[id];
+            if (!name) return;
+            const cold = document.querySelector('[class*="st-key-face-' + name + '-cold"]');
+            const warm = document.querySelector('[class*="st-key-face-' + name + '-warm"]');
+            if (cold) cold.style.display = hot ? "none" : "flex";
+            if (warm) warm.style.display = hot ? "flex" : "none";
+          }
+          function bootNbaFaces() {
+            Object.keys(nbaFaces).forEach((id) => {
+              let hot = false;
+              try { hot = sessionStorage.getItem(id) === "1"; } catch (error) {}
+              applyNbaFace(id, hot);
+            });
+          }
+          if (!window.__nbaFaceBridge) {
+            window.__nbaFaceBridge = true;
+            window.addEventListener("message", (event) => {
+              const data = event.data || {};
+              if (data.type !== "nba-hot") return;
+              applyNbaFace(data.id, !!data.hot);
+              document.querySelectorAll("iframe").forEach((frame) => {
+                try { frame.contentWindow.postMessage(data, "*"); } catch (error) {}
+              });
+            });
+          }
+          bootNbaFaces();
+          setTimeout(bootNbaFaces, 250);
+        </script>
+        """,
+        unsafe_allow_javascript=True,
+    )
 
 
 def section(label: str) -> None:
@@ -376,9 +431,84 @@ def _figure_spec(figure: go.Figure) -> str:
     return json.dumps(payload).replace("<", "\\u003c")
 
 
+def _switch_button(switch_id: str) -> None:
+    page = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@700&display=swap" />
+      <style>
+        html, body {{ margin: 0; background: #17191e; }}
+        .switch {{
+          display: flex; align-items: flex-end; justify-content: center; gap: 16px;
+          width: 100%; margin: 0; padding: 2px 0 0; border: 0; background: transparent; cursor: pointer;
+        }}
+        .end {{
+          display: flex; flex-direction: column; align-items: center; gap: 2px; width: 78px;
+          opacity: 0.42; filter: grayscale(0.35); transition: opacity 140ms ease, filter 140ms ease;
+        }}
+        .end span {{
+          font-family: Barlow, sans-serif; font-size: 11px; font-weight: 700;
+          letter-spacing: 0.14em; text-transform: uppercase; color: #d9d3c5;
+        }}
+        .end svg {{ width: 64px; height: 72px; display: block; }}
+        .track {{
+          position: relative; width: 96px; height: 42px; margin-bottom: 16px; border-radius: 999px;
+          background: #1a2833; border: 1px solid #8eb8c4; transition: background 140ms ease, border-color 140ms ease;
+        }}
+        .knob {{
+          position: absolute; top: 4px; left: 4px; width: 32px; height: 32px; border-radius: 50%;
+          background: #f3efe4; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35); transform: translateX(54px);
+          transition: transform 140ms ease, background 140ms ease;
+        }}
+        .switch.is-hot .knob {{ transform: translateX(0); background: #ffe7c2; }}
+        .switch.is-hot .track {{ background: #3a2218; border-color: #d6453d; }}
+        .switch.is-hot .end.hot, .switch:not(.is-hot) .end.cold {{ opacity: 1; filter: none; }}
+        .switch.is-hot .end.hot svg {{ filter: drop-shadow(0 0 8px rgba(240, 120, 40, 0.9)); }}
+        .switch:not(.is-hot) .end.cold svg {{ filter: drop-shadow(0 0 8px rgba(150, 210, 235, 0.95)); }}
+      </style>
+    </head>
+    <body>
+      <button type="button" class="switch" id="switch" aria-pressed="false">
+        <span class="end hot">{FLAME}<span>Hot</span></span>
+        <span class="track" aria-hidden="true"><span class="knob"></span></span>
+        <span class="end cold">{ICE}<span>Ice cold</span></span>
+      </button>
+      <script>
+        const key = {json.dumps(switch_id)};
+        const button = document.getElementById("switch");
+        function paint(hot) {{
+          button.classList.toggle("is-hot", hot);
+          button.setAttribute("aria-pressed", hot ? "true" : "false");
+          button.setAttribute("aria-label", hot ? "Showing hot. Switch to ice cold." : "Showing ice cold. Switch to hot.");
+        }}
+        function publish(hot) {{
+          try {{ sessionStorage.setItem(key, hot ? "1" : "0"); }} catch (error) {{}}
+          window.parent.postMessage({{type: "nba-hot", id: key, hot: hot}}, "*");
+        }}
+        button.addEventListener("click", () => {{
+          const next = !button.classList.contains("is-hot");
+          paint(next);
+          publish(next);
+        }});
+        let hot = false;
+        try {{ hot = sessionStorage.getItem(key) === "1"; }} catch (error) {{}}
+        paint(hot);
+        publish(hot);
+      </script>
+    </body>
+    </html>
+    """
+    components.html(page, height=128, scrolling=False)
+
+
 def hot_cold_switch(
     *,
     switch_id: str,
+    face: str,
+    cold_key: str,
+    hot_key: str,
     cold_claim: str,
     hot_claim: str,
     cold_title: str,
@@ -388,9 +518,14 @@ def hot_cold_switch(
     caption: str,
 ) -> None:
     """Both charts are already in the page. The switch only shows one of them."""
+    _switch_button(switch_id)
+    with st.container(key=f"face-{face}-cold"):
+        claim(cold_claim, key=cold_key)
+    with st.container(key=f"face-{face}-warm"):
+        claim(hot_claim, key=hot_key)
     chart_height = int(cold_fig.layout.height or 420)
-    deck_height = chart_height + 230
-    frame_height = deck_height + 196
+    deck_height = chart_height + 90
+    frame_height = deck_height + 96
     page = f"""
     <!doctype html>
     <html>
@@ -516,19 +651,12 @@ def hot_cold_switch(
       </style>
     </head>
     <body>
-      <button type="button" class="switch" id="switch" aria-pressed="false">
-        <span class="end hot">{FLAME}<span>Hot</span></span>
-        <span class="track" aria-hidden="true"><span class="knob"></span></span>
-        <span class="end cold">{ICE}<span>Ice cold</span></span>
-      </button>
       <div class="deck">
         <div class="face on" id="cold-face">
-          <p class="reading">{html.escape(cold_claim)}</p>
           <p class="chart-title">{html.escape(cold_title)}</p>
           <div class="plot" id="cold-plot"></div>
         </div>
         <div class="face" id="hot-face">
-          <p class="reading">{html.escape(hot_claim)}</p>
           <p class="chart-title">{html.escape(hot_title)}</p>
           <div class="plot" id="hot-plot"></div>
         </div>
@@ -546,21 +674,20 @@ def hot_cold_switch(
         fit(hotSpec);
         const config = {{displayModeBar: false, scrollZoom: false, doubleClick: false, responsive: true}};
         const key = {json.dumps(switch_id)};
-        const button = document.getElementById("switch");
         const coldFace = document.getElementById("cold-face");
         const hotFace = document.getElementById("hot-face");
         function apply(hot) {{
-          button.classList.toggle("is-hot", hot);
-          button.setAttribute("aria-pressed", hot ? "true" : "false");
-          button.setAttribute("aria-label", hot ? "Showing hot. Switch to ice cold." : "Showing ice cold. Switch to hot.");
           coldFace.classList.toggle("on", !hot);
           hotFace.classList.toggle("on", hot);
-          requestAnimationFrame(() => Plotly.Plots.resize(hot ? "hot-plot" : "cold-plot"));
+          const plotId = hot ? "hot-plot" : "cold-plot";
+          requestAnimationFrame(() => {{
+            try {{ Plotly.Plots.resize(plotId); }} catch (error) {{}}
+          }});
         }}
-        button.addEventListener("click", () => {{
-          const hot = !button.classList.contains("is-hot");
-          try {{ sessionStorage.setItem(key, hot ? "1" : "0"); }} catch (error) {{}}
-          apply(hot);
+        window.addEventListener("message", (event) => {{
+          const data = event.data || {{}};
+          if (data.type !== "nba-hot" || data.id !== key) return;
+          apply(!!data.hot);
         }});
         Promise.all([
           Plotly.newPlot("cold-plot", coldSpec.data, coldSpec.layout, config),
@@ -625,6 +752,7 @@ def missing_cache() -> None:
 
 def nba_page() -> None:
     st.html('<p class="back"><a href="/">Home</a></p>')
+    face_styles()
     if not any((nba.CACHE / "team_gamelogs").glob("*.parquet")):
         missing_cache()
         return
@@ -763,16 +891,20 @@ def nba_page() -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(
-        '<p class="deck">A back-to-back is a game on the day after that club\'s previous game. '
+    from app import story_paragraph
+
+    story_paragraph(
+        "nba_deck",
+        "A back-to-back is a game on the day after that club's previous game. "
         "True shooting pools every field goal and free throw, points divided by twice the attempts plus 0.44 free throws. "
-        "The question is whether the second night takes that shot away, for the club and for the players who had to play it.</p>",
-        unsafe_allow_html=True,
+        "The question is whether the second night takes that shot away, for the club and for the players who had to play it.",
+        "deck",
     )
     walk(
         f"The file runs from {seasons[0]} through {seasons[-1]}, {count(int(played.shape[0]))} team-games with a previous game to measure. "
         f"Regular season only. The first game of each season stays out, {count(openers)} team-games. "
-        f"Home and road come from the matchup.{held_line}"
+        f"Home and road come from the matchup.{held_line}",
+        key="nba_file",
     )
 
     section("The second night")
@@ -780,7 +912,8 @@ def nba_page() -> None:
         f"Teams won {rate(second['win_pct'])} of back-to-backs and {rate(one['win_pct'])} with one day off. "
         f"With three or more days off they won {rate(long_rest['win_pct'])}. "
         f"True shooting moved from {rate(second['ts'])} to {rate(long_rest['ts'])} across that same span, "
-        f"on {count(int(second['games']))} back-to-backs and {count(int(long_rest['games']))} long layoffs."
+        f"on {count(int(second['games']))} back-to-backs and {count(int(long_rest['games']))} long layoffs.",
+        key="nba_second_claim",
     )
     chart_heading("True shooting by nights off")
     st.plotly_chart(nights_figure(rest), width="stretch", config=CHART)
@@ -793,31 +926,36 @@ def nba_page() -> None:
         f"The opponent scored {points(second['opp_pts'])} instead of {points(one['opp_pts'])}, and the margin moved from "
         f"{signed_points(one['margin'])} to {signed_points(second['margin'])}. "
         f"Possessions were {points(second['pace'])} a game on the second night and {points(one['pace'])} with one day off. "
-        f"Offensive rating moved from {points(one['ortg'])} to {points(second['ortg'])} per 100 possessions."
+        f"Offensive rating moved from {points(one['ortg'])} to {points(second['ortg'])} per 100 possessions.",
+        key="nba_points",
     )
     walk(
         f"Two days off shot {rate(two['ts'])}, in line with one day off, and won {rate(two['win_pct'])}. "
         f"Three or more days off shot {rate(long_rest['ts'])} across {count(int(long_rest['games']))} games. "
-        f"That bucket holds the All-Star break and the other long layoffs."
+        f"That bucket holds the All-Star break and the other long layoffs.",
+        key="nba_two_days",
     )
     walk(
         f"Two-point field goals fell from {rate(one['fg2'])} to {rate(second['fg2'])}. "
         f"Threes went from {rate(one['fg3'])} to {rate(second['fg3'])}, and three-point attempts stayed at "
         f"{rate(second['three_rate'])} of field goals against {rate(one['three_rate'])}. "
         f"Free throws were {rate(second['ft'])} on a back-to-back and {rate(one['ft'])} with one day off. "
-        f"Turnovers were {rate(second['tov_rate'])} of possessions and {rate(one['tov_rate'])}."
+        f"Turnovers were {rate(second['tov_rate'])} of possessions and {rate(one['tov_rate'])}.",
+        key="nba_shot_mix",
     )
     walk(
         f"The gap is in each of the {len(by_season)} seasons, from {narrow['ts_gap'] * 100:.1f} points in {narrow['season']} "
         f"to {widest['ts_gap'] * 100:.1f} points in {widest['season']}. "
         f"{quiet['month']} is the quiet month for the shot: back-to-backs shot {rate(quiet['b2b']['ts'])} and one day off shot "
         f"{rate(quiet['one']['ts'])}. {harsh['month']} is the wide month for wins, {rate(harsh['b2b']['win_pct'])} against "
-        f"{rate(harsh['one']['win_pct'])} with one day off."
+        f"{rate(harsh['one']['win_pct'])} with one day off.",
+        key="nba_seasons",
     )
     walk(
         f"Home teams shot {rate(home['ts'])} and won {rate(home['win_pct'])}. "
         f"A home back-to-back shot {rate(home_b2b['ts'])}. A rested team on the road shot {rate(road_rest['ts'])}. "
-        f"The building is about a point of true shooting. The second night, set against one day off, is half a point."
+        f"The building is about a point of true shooting. The second night, set against one day off, is half a point.",
+        key="nba_home",
     )
     if not position.empty:
         named = {"Guard": "Guards", "Forward": "Forwards", "Center": "Centers"}
@@ -837,7 +975,7 @@ def nba_page() -> None:
             and centers.iloc[0]["rest_ts"] > guards.iloc[0]["rest_ts"]
         ):
             extra += " Centers sit higher on both nights."
-        walk(f"{levels}.{extra}")
+        walk(f"{levels}.{extra}", key="nba_position")
 
     def at(site: str, edge: str) -> dict:
         return nba.pooled(played.loc[played["SITE"].eq(site) & played["EDGE"].eq(edge)])
@@ -886,7 +1024,8 @@ def nba_page() -> None:
         f"A team with one day off, also against a rested opponent, won {rate(fresh_one['win_pct'])} and shot {rate(fresh_one['ts'])}, "
         f"on {count(int(fresh_one['games']))} games. "
         f"The tired club scored {points(tired_only['pts_per_game'])} and allowed {points(tired_only['opp_pts'])}. "
-        f"The one-day club scored {points(fresh_one['pts_per_game'])} and allowed {points(fresh_one['opp_pts'])}."
+        f"The one-day club scored {points(fresh_one['pts_per_game'])} and allowed {points(fresh_one['opp_pts'])}.",
+        key="nba_rested_claim",
     )
     chart_heading("Home win rate, by who played yesterday")
     st.plotly_chart(home_edge_figure(matchups, home_clear["win_pct"]), width="stretch", config=CHART)
@@ -897,18 +1036,21 @@ def nba_page() -> None:
     walk(
         f"When only the visitor was on a back-to-back, the home club won {rate(home_only_visitor['win_pct'])} "
         f"and shot {rate(home_only_visitor['ts'])}. The visitor won {rate(road_only_visitor['win_pct'])} "
-        f"and shot {rate(road_only_visitor['ts'])}, on {count(int(home_only_visitor['games']))} games."
+        f"and shot {rate(road_only_visitor['ts'])}, on {count(int(home_only_visitor['games']))} games.",
+        key="nba_visitor_only",
     )
     walk(
         f"When both clubs were on a back-to-back, the home club won {rate(home_both['win_pct'])} and shot "
         f"{rate(home_both['ts'])}, and the visitor shot {rate(road_both['ts'])}, on {count(int(home_both['games']))} games. "
-        f"When neither club was tired, the home club won {rate(home_clear['win_pct'])} and shot {rate(home_clear['ts'])}."
+        f"When neither club was tired, the home club won {rate(home_clear['win_pct'])} and shot {rate(home_clear['ts'])}.",
+        key="nba_both_home",
     )
     walk(
         f"When only the home club was on a back-to-back, that club won {rate(home_only_home['win_pct'])} "
         f"and shot {rate(home_only_home['ts'])}. The rested visitor won {rate(road_only_home['win_pct'])} "
         f"and shot {rate(road_only_home['ts'])}, on {count(int(home_only_home['games']))} games. "
-        f"On an ordinary road night the visitor won {rate(road_clear['win_pct'])} and shot {rate(road_clear['ts'])}."
+        f"On an ordinary road night the visitor won {rate(road_clear['win_pct'])} and shot {rate(road_clear['ts'])}.",
+        key="nba_home_only",
     )
     chart_heading("Wins by the trip into the game")
     st.plotly_chart(trip_figure(trips), width="stretch", config=CHART)
@@ -923,18 +1065,21 @@ def nba_page() -> None:
         f"against {rate(stayed['one_win'])} for a home game with one day off. "
         f"Coming home the next night, true shooting was {rate(came['b2b_ts'])} against {rate(came['one_ts'])}, "
         f"and the win rate was {rate(came['b2b_win'])} against {rate(came['one_win'])}. "
-        f"The second city of a road trip won {rate(road_trip['b2b_win'])}, against {rate(road_trip['one_win'])} with a day off."
+        f"The second city of a road trip won {rate(road_trip['b2b_win'])}, against {rate(road_trip['one_win'])} with a day off.",
+        key="nba_trip",
     )
     walk(
         f"When both clubs were on a back-to-back, true shooting was {rate(both_tired['ts'])} and the games averaged "
         f"{points(both_tired['pts_per_game'])} points, on {count(int(both_tired['games']))} games. "
         f"When neither club was, true shooting was {rate(neither['ts'])} and the games averaged "
-        f"{points(neither['pts_per_game'])} points."
+        f"{points(neither['pts_per_game'])} points.",
+        key="nba_both_score",
     )
     walk(
         f"Second-night opponents won {rate(b2b_opp_win)} of their games that season. "
         f"Opponents of a team with one day off won {rate(one_opp_win)}. "
-        f"The box score has the date, the building, and the shots. It has no injury report and no miles between cities."
+        f"The box score has the date, the building, and the shots. It has no injury report and no miles between cities.",
+        key="nba_opponent_record",
     )
 
     section("The clubs")
@@ -944,6 +1089,9 @@ def nba_page() -> None:
     hot_club = hot_clubs.loc[hot_clubs["ts_gap"].idxmax()]
     hot_cold_switch(
         switch_id="nba-clubs-hot",
+        face="clubs",
+        cold_key="nba_clubs_cold",
+        hot_key="nba_clubs_hot",
         cold_claim=(
             f"The {cold_club['name']} shot {rate(cold_club['b2b_ts'])} on {count(int(cold_club['b2b_games']))} back-to-backs "
             f"and {rate(cold_club['rest_ts'])} in their other games. The margin moved from "
@@ -974,13 +1122,15 @@ def nba_page() -> None:
         f"and the margin moved {signed_points(low_win['margin_gap'])}. "
         f"The {next_win['name']} won {rate(next_win['b2b_win'])} of their back-to-backs and {rate(next_win['rest_win'])} otherwise. "
         f"The {high_win['name']} won {rate(high_win['b2b_win'])} on the second night and {rate(high_win['rest_win'])} otherwise, "
-        f"with true shooting {abs(high_win['ts_gap']) * 100:.1f} points {'lower' if high_win['ts_gap'] < 0 else 'higher'}."
+        f"with true shooting {abs(high_win['ts_gap']) * 100:.1f} points {'lower' if high_win['ts_gap'] < 0 else 'higher'}.",
+        key="nba_win_clubs",
     )
     walk(
         f"The {low_win['name']} played {rate(low_road)} of their {count(int(low_win['b2b_games']))} second nights on the road, "
         f"and {rate(low_fresh)} of them faced a rested opponent. The {worst_shot['name']} played {rate(shot_road)} of their "
         f"{count(int(worst_shot['b2b_games']))} second nights on the road, and {rate(shot_fresh)} of them faced a rested opponent. "
-        f"Across the league, {rate(league_road)} of back-to-backs are on the road and {rate(league_fresh)} face a rested opponent."
+        f"Across the league, {rate(league_road)} of back-to-backs are on the road and {rate(league_fresh)} face a rested opponent.",
+        key="nba_slate",
     )
 
     with st.expander("Look up one club"):
@@ -1008,7 +1158,8 @@ def nba_page() -> None:
                 claim(
                     f"{choice} won {rate(club_second.iloc[0]['win_pct'])} of {count(int(club_second.iloc[0]['games']))} back-to-backs "
                     f"and {rate(club_one.iloc[0]['win_pct'])} of {count(int(club_one.iloc[0]['games']))} games with one day off. "
-                    f"They shot {rate(club_second.iloc[0]['ts'])} and {rate(club_one.iloc[0]['ts'])}."
+                    f"They shot {rate(club_second.iloc[0]['ts'])} and {rate(club_one.iloc[0]['ts'])}.",
+                    key="nba_one_club",
                 )
             chart_heading(choice)
             st.plotly_chart(club_rest_figure(club_rest, league_for_club), width="stretch", config=CHART)
@@ -1020,12 +1171,16 @@ def nba_page() -> None:
                     f"At home, {choice} shot {rate(club_home['ts'])}, won {rate(club_home['win_pct'])}, "
                     f"and finished {signed_points(club_home['margin'])} points over {count(int(club_home['games']))} games. "
                     f"On the road, {rate(club_away['ts'])}, {rate(club_away['win_pct'])}, "
-                    f"and {signed_points(club_away['margin'])} points over {count(int(club_away['games']))} games."
+                    f"and {signed_points(club_away['margin'])} points over {count(int(club_away['games']))} games.",
+                    key="nba_one_club_site",
                 )
 
     section("The players")
     if cases.empty:
-        walk("Player game logs are not on disk yet. Run cache_nba_data.py and the names fill in.")
+        walk(
+            "Player game logs are not on disk yet. Run cache_nba_data.py and the names fill in.",
+            key="nba_players_missing",
+        )
     else:
         cold_players = cases.nsmallest(ENDS, "ts_gap")
         hot_players = cases.nlargest(ENDS, "ts_gap")
@@ -1033,6 +1188,9 @@ def nba_page() -> None:
         hot_player = hot_players.loc[hot_players["ts_gap"].idxmax()]
         hot_cold_switch(
             switch_id="nba-players-hot",
+            face="players",
+            cold_key="nba_players_cold",
+            hot_key="nba_players_hot",
             cold_claim=(
                 f"{cold_player['name']} shot {rate(cold_player['b2b_ts'])} on {count(int(cold_player['b2b_n']))} nights "
                 f"after playing the day before, and {rate(cold_player['rest_ts'])} on {count(int(cold_player['rest_n']))} games "
@@ -1056,6 +1214,7 @@ def nba_page() -> None:
 
     section("The count")
     rest_table(rest)
+    face_bridge()
     st.caption(
         "Regular season, from the team game log. True shooting, win rate, and the free-throw and turnover shares "
         "in the text are points on a 100-point scale. Possessions are field-goal attempts, 0.44 free throws, "

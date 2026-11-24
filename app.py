@@ -631,6 +631,22 @@ def save_story(blocks: dict[str, str]) -> None:
     STORY_PATH.write_text(json.dumps(blocks, indent=2), encoding="utf-8")
 
 
+def personal_copy() -> bool:
+    """Edit controls stay on this machine. The live site does not show them."""
+    try:
+        url = str(st.context.url or "")
+        headers = st.context.headers
+        host = ""
+        if headers is not None:
+            host = str(headers.get("Host") or headers.get("host") or "")
+    except Exception:
+        return False
+    blob = f"{url} {host}".lower()
+    if "streamlit.app" in blob:
+        return False
+    return "localhost" in blob or "127.0.0.1" in blob
+
+
 def story_line(key: str, default: str) -> str:
     saved = load_story().get(key, "")
     if saved.strip():
@@ -643,9 +659,9 @@ def story_html(text: str) -> str:
 
 
 def story_paragraph(key: str, default: str, css_class: str) -> None:
-    """Show one story paragraph, with Edit underneath. Edit opens that paragraph only."""
+    """Show one story paragraph. On localhost, Edit underneath opens that paragraph only."""
     state_key = f"story_edit_{key}"
-    editing = st.session_state.get("story_editing") == key
+    editing = personal_copy() and st.session_state.get("story_editing") == key
     if editing:
         if state_key not in st.session_state:
             st.session_state[state_key] = story_line(key, default)
@@ -680,6 +696,8 @@ def story_paragraph(key: str, default: str, css_class: str) -> None:
         f'<p class="{css_class}">{story_html(story_line(key, default))}</p>',
         unsafe_allow_html=True,
     )
+    if not personal_copy():
+        return
     _left, mid, _right = st.columns([1, 0.28, 1])
     with mid:
         if st.button("Edit", key=f"story_edit_btn_{key}"):
