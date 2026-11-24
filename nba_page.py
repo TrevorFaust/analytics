@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import calendar
 import html
+import json
 
 import pandas
 import plotly.graph_objects as go
 import streamlit as st
+import streamlit.components.v1 as components
 
 import nba
 
@@ -333,6 +335,246 @@ def cast_figure(cases: pandas.DataFrame, worst: bool = True) -> go.Figure:
     )
     figure.update_xaxes(tickformat=".0%", range=[float(values.min()) - 0.025, float(values.max()) + 0.04])
     return figure
+
+
+FLAME = """
+<svg viewBox="0 0 64 78" aria-hidden="true">
+  <defs>
+    <linearGradient id="flame-outer" x1="32" y1="74" x2="32" y2="6" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#d6453d"/>
+      <stop offset="0.55" stop-color="#f08a24"/>
+      <stop offset="1" stop-color="#ffe27a"/>
+    </linearGradient>
+    <linearGradient id="flame-inner" x1="32" y1="70" x2="32" y2="28" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#ffb703"/>
+      <stop offset="1" stop-color="#fff4c2"/>
+    </linearGradient>
+  </defs>
+  <path fill="url(#flame-outer)" d="M32 2c1.2 8.4 6.4 13.2 7.2 21.4.4 4.2-1.6 6.6-1.2 10.2 4.8-2.6 9.4-8.2 10.6-15.2 7.6 8.2 11.4 17.6 11.4 27.4 0 15.8-11.6 28.2-28 28.2S4.2 61.6 4.2 45.8C4.2 33.2 12 23.4 18.6 16.2c1.6 7.2 5.4 10.8 8.8 14.2C24.6 22.2 24.2 12.4 32 2z"/>
+  <path fill="url(#flame-inner)" d="M32 28c.6 5.2 4 8.2 4.4 13.2.2 2.6-1 4.2-.6 6.6 2.6-1.6 5.2-5 5.8-9.2 3.6 4.4 5.6 9.2 5.6 14.2 0 8.6-6.2 15.2-15.2 15.2S17 61.4 17 52.8c0-6.6 4-12.2 7.6-16.4 1 4.2 3.2 6.4 5.2 8.4-.8-5.2-1.2-11.2 2.2-16.8z"/>
+</svg>
+"""
+
+ICE = """
+<svg viewBox="0 0 72 78" aria-hidden="true">
+  <ellipse cx="36" cy="68" rx="24" ry="5.5" fill="#9fd4ee" opacity="0.85"/>
+  <path d="M16 30 L36 18 L56 30 L56 50 L36 62 L16 50 Z" fill="#eaf7ff" stroke="#7eb8d4" stroke-width="1.4"/>
+  <path d="M16 30 L36 40 L36 62 L16 50 Z" fill="#b7e2f6"/>
+  <path d="M56 30 L36 40 L36 62 L56 50 Z" fill="#d4f0fb"/>
+  <path d="M16 30 L36 18 L56 30 L36 40 Z" fill="#ffffff"/>
+  <path d="M24 26.5 L36 20.2 L32 27.5 Z" fill="#ffffff" opacity="0.9"/>
+  <circle cx="52" cy="70" r="2.2" fill="#b7e2f6"/>
+</svg>
+"""
+
+
+def _figure_spec(figure: go.Figure) -> str:
+    payload = json.loads(figure.to_json())
+    layout = payload.get("layout") or {}
+    layout.pop("template", None)
+    payload["layout"] = layout
+    return json.dumps(payload).replace("<", "\\u003c")
+
+
+def hot_cold_switch(
+    *,
+    switch_id: str,
+    cold_claim: str,
+    hot_claim: str,
+    cold_title: str,
+    hot_title: str,
+    cold_fig: go.Figure,
+    hot_fig: go.Figure,
+    caption: str,
+) -> None:
+    """Both charts are already in the page. The switch only shows one of them."""
+    chart_height = int(cold_fig.layout.height or 420)
+    deck_height = chart_height + 230
+    frame_height = deck_height + 196
+    page = f"""
+    <!doctype html>
+    <html>
+    <head>
+      <meta charset="utf-8" />
+      <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@500;700&family=Fraunces:opsz,wght@9..144,560&display=swap" />
+      <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+      <style>
+        html, body {{
+          margin: 0;
+          background: #17191e;
+          color: #f3efe4;
+          font-family: Barlow, sans-serif;
+        }}
+        .switch {{
+          display: flex;
+          align-items: flex-end;
+          justify-content: center;
+          gap: 16px;
+          width: 100%;
+          margin: 0 0 8px;
+          padding: 2px 0 0;
+          border: 0;
+          background: transparent;
+          color: inherit;
+          cursor: pointer;
+        }}
+        .end {{
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 2px;
+          width: 78px;
+          opacity: 0.42;
+          filter: grayscale(0.35);
+          transition: opacity 140ms ease, filter 140ms ease;
+        }}
+        .end span {{
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.14em;
+          text-transform: uppercase;
+          color: #d9d3c5;
+        }}
+        .end svg {{ width: 64px; height: 72px; display: block; }}
+        .track {{
+          position: relative;
+          width: 96px;
+          height: 42px;
+          margin-bottom: 16px;
+          border-radius: 999px;
+          background: #1a2833;
+          border: 1px solid #8eb8c4;
+          transition: background 140ms ease, border-color 140ms ease;
+        }}
+        .knob {{
+          position: absolute;
+          top: 4px;
+          left: 4px;
+          width: 32px;
+          height: 32px;
+          border-radius: 50%;
+          background: #f3efe4;
+          box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+          transform: translateX(54px);
+          transition: transform 140ms ease, background 140ms ease;
+        }}
+        .switch.is-hot .knob {{
+          transform: translateX(0);
+          background: #ffe7c2;
+        }}
+        .switch.is-hot .track {{
+          background: #3a2218;
+          border-color: #d6453d;
+        }}
+        .switch.is-hot .end.hot,
+        .switch:not(.is-hot) .end.cold {{
+          opacity: 1;
+          filter: none;
+        }}
+        .switch.is-hot .end.hot svg {{ filter: drop-shadow(0 0 8px rgba(240, 120, 40, 0.9)); }}
+        .switch:not(.is-hot) .end.cold svg {{ filter: drop-shadow(0 0 8px rgba(150, 210, 235, 0.95)); }}
+        .deck {{ position: relative; height: {deck_height}px; }}
+        .face {{
+          position: absolute;
+          inset: 0;
+          visibility: hidden;
+        }}
+        .face.on {{ visibility: visible; }}
+        .reading {{
+          margin: 8px auto 6px;
+          max-width: 68rem;
+          color: #f3efe4;
+          font-family: Fraunces, serif;
+          font-size: clamp(1.45rem, 2.4vw, 2rem);
+          font-weight: 560;
+          letter-spacing: -0.03em;
+          line-height: 1.18;
+          text-align: center;
+        }}
+        .chart-title {{
+          margin: 10px auto 8px;
+          color: #f3efe4;
+          font-family: Fraunces, serif;
+          font-size: clamp(1.15rem, 1.8vw, 1.45rem);
+          text-align: center;
+        }}
+        .plot {{
+          height: {chart_height}px;
+          background: #21242b;
+          border: 1px solid #3a4150;
+          border-radius: 12px;
+          overflow: hidden;
+        }}
+        .caption {{
+          margin: 8px auto 0;
+          max-width: 68rem;
+          color: #d9d3c5;
+          font-size: 0.95rem;
+          line-height: 1.45;
+          text-align: center;
+        }}
+      </style>
+    </head>
+    <body>
+      <button type="button" class="switch" id="switch" aria-pressed="false">
+        <span class="end hot">{FLAME}<span>Hot</span></span>
+        <span class="track" aria-hidden="true"><span class="knob"></span></span>
+        <span class="end cold">{ICE}<span>Ice cold</span></span>
+      </button>
+      <div class="deck">
+        <div class="face on" id="cold-face">
+          <p class="reading">{html.escape(cold_claim)}</p>
+          <p class="chart-title">{html.escape(cold_title)}</p>
+          <div class="plot" id="cold-plot"></div>
+        </div>
+        <div class="face" id="hot-face">
+          <p class="reading">{html.escape(hot_claim)}</p>
+          <p class="chart-title">{html.escape(hot_title)}</p>
+          <div class="plot" id="hot-plot"></div>
+        </div>
+      </div>
+      <p class="caption">{html.escape(caption)}</p>
+      <script>
+        const coldSpec = { _figure_spec(cold_fig) };
+        const hotSpec = { _figure_spec(hot_fig) };
+        function fit(spec) {{
+          spec.layout.margin = Object.assign({{}}, spec.layout.margin, {{l: 188, r: 28, t: 24, b: 12}});
+          if (spec.layout.yaxis) spec.layout.yaxis.automargin = true;
+          return spec;
+        }}
+        fit(coldSpec);
+        fit(hotSpec);
+        const config = {{displayModeBar: false, scrollZoom: false, doubleClick: false, responsive: true}};
+        const key = {json.dumps(switch_id)};
+        const button = document.getElementById("switch");
+        const coldFace = document.getElementById("cold-face");
+        const hotFace = document.getElementById("hot-face");
+        function apply(hot) {{
+          button.classList.toggle("is-hot", hot);
+          button.setAttribute("aria-pressed", hot ? "true" : "false");
+          button.setAttribute("aria-label", hot ? "Showing hot. Switch to ice cold." : "Showing ice cold. Switch to hot.");
+          coldFace.classList.toggle("on", !hot);
+          hotFace.classList.toggle("on", hot);
+          requestAnimationFrame(() => Plotly.Plots.resize(hot ? "hot-plot" : "cold-plot"));
+        }}
+        button.addEventListener("click", () => {{
+          const hot = !button.classList.contains("is-hot");
+          try {{ sessionStorage.setItem(key, hot ? "1" : "0"); }} catch (error) {{}}
+          apply(hot);
+        }});
+        Promise.all([
+          Plotly.newPlot("cold-plot", coldSpec.data, coldSpec.layout, config),
+          Plotly.newPlot("hot-plot", hotSpec.data, hotSpec.layout, config)
+        ]).then(() => {{
+          let hot = false;
+          try {{ hot = sessionStorage.getItem(key) === "1"; }} catch (error) {{}}
+          apply(hot);
+        }});
+      </script>
+    </body>
+    </html>
+    """
+    components.html(page, height=frame_height, scrolling=False)
 
 
 def rest_table(table: pandas.DataFrame) -> None:
@@ -696,21 +938,33 @@ def nba_page() -> None:
     )
 
     section("The clubs")
-    show_best_clubs = st.toggle("Clubs that shot better on a second night", value=False)
-    club_shown = gaps.nlargest(ENDS, "ts_gap") if show_best_clubs else gaps.nsmallest(ENDS, "ts_gap")
-    lead_club = club_shown.loc[club_shown["ts_gap"].idxmax() if show_best_clubs else club_shown["ts_gap"].idxmin()]
-    claim(
-        f"The {lead_club['name']} shot {rate(lead_club['b2b_ts'])} on {count(int(lead_club['b2b_games']))} back-to-backs "
-        f"and {rate(lead_club['rest_ts'])} in their other games. The margin moved from "
-        f"{signed_points(lead_club['rest_margin'])} to {signed_points(lead_club['b2b_margin'])}, and the win rate moved from "
-        f"{rate(lead_club['rest_win'])} to {rate(lead_club['b2b_win'])}."
-    )
-    chart_heading("Where the second night shoots better" if show_best_clubs else "Where the drop is widest")
-    st.plotly_chart(club_gap_figure(club_shown, league_gap, worst=not show_best_clubs), width="stretch", config=CHART)
-    st.caption(
-        f"Back-to-back true shooting minus the other games. The gold line is the league gap, {league_gap * 100:.1f} points. "
-        f"Red is a larger drop than the league. The switch above changes this list from the {ENDS} widest drops "
-        f"to the {ENDS} widest gains."
+    cold_clubs = gaps.nsmallest(ENDS, "ts_gap")
+    hot_clubs = gaps.nlargest(ENDS, "ts_gap")
+    cold_club = cold_clubs.loc[cold_clubs["ts_gap"].idxmin()]
+    hot_club = hot_clubs.loc[hot_clubs["ts_gap"].idxmax()]
+    hot_cold_switch(
+        switch_id="nba-clubs-hot",
+        cold_claim=(
+            f"The {cold_club['name']} shot {rate(cold_club['b2b_ts'])} on {count(int(cold_club['b2b_games']))} back-to-backs "
+            f"and {rate(cold_club['rest_ts'])} in their other games. The margin moved from "
+            f"{signed_points(cold_club['rest_margin'])} to {signed_points(cold_club['b2b_margin'])}, and the win rate moved from "
+            f"{rate(cold_club['rest_win'])} to {rate(cold_club['b2b_win'])}."
+        ),
+        hot_claim=(
+            f"The {hot_club['name']} shot {rate(hot_club['b2b_ts'])} on {count(int(hot_club['b2b_games']))} back-to-backs "
+            f"and {rate(hot_club['rest_ts'])} in their other games. The margin moved from "
+            f"{signed_points(hot_club['rest_margin'])} to {signed_points(hot_club['b2b_margin'])}, and the win rate moved from "
+            f"{rate(hot_club['rest_win'])} to {rate(hot_club['b2b_win'])}."
+        ),
+        cold_title="Where the drop is widest",
+        hot_title="Where the second night shoots better",
+        cold_fig=club_gap_figure(cold_clubs, league_gap, worst=True),
+        hot_fig=club_gap_figure(hot_clubs, league_gap, worst=False),
+        caption=(
+            f"Ice cold is the {ENDS} widest drops. Hot is the {ENDS} widest gains. "
+            f"Back-to-back true shooting minus the other games. The gold line is the league gap, {league_gap * 100:.1f} points. "
+            "Red is a larger drop than the league."
+        ),
     )
     walk(
         f"Win rate and true shooting land on different clubs. "
@@ -773,20 +1027,31 @@ def nba_page() -> None:
     if cases.empty:
         walk("Player game logs are not on disk yet. Run cache_nba_data.py and the names fill in.")
     else:
-        show_best_players = st.toggle("Players who shot better on a second night", value=False)
-        player_shown = cases.nlargest(ENDS, "ts_gap") if show_best_players else cases.nsmallest(ENDS, "ts_gap")
-        lead_player = player_shown.loc[player_shown["ts_gap"].idxmax() if show_best_players else player_shown["ts_gap"].idxmin()]
-        claim(
-            f"{lead_player['name']} shot {rate(lead_player['b2b_ts'])} on {count(int(lead_player['b2b_n']))} nights "
-            f"after playing the day before, and {rate(lead_player['rest_ts'])} on {count(int(lead_player['rest_n']))} games "
-            f"with a day off. The minutes were {points(lead_player['b2b_min'])} and {points(lead_player['rest_min'])}."
-        )
-        chart_heading("Widest gains on a second night" if show_best_players else "Widest drops on a second night")
-        st.plotly_chart(cast_figure(player_shown, worst=not show_best_players), width="stretch", config=CHART)
-        st.caption(
-            "Red is a night after he played. Gold is a day between his games. "
-            f"A player needs 30 second nights and 50 games with one day off. The switch above changes the list "
-            f"from the {ENDS} widest drops to the {ENDS} widest gains."
+        cold_players = cases.nsmallest(ENDS, "ts_gap")
+        hot_players = cases.nlargest(ENDS, "ts_gap")
+        cold_player = cold_players.loc[cold_players["ts_gap"].idxmin()]
+        hot_player = hot_players.loc[hot_players["ts_gap"].idxmax()]
+        hot_cold_switch(
+            switch_id="nba-players-hot",
+            cold_claim=(
+                f"{cold_player['name']} shot {rate(cold_player['b2b_ts'])} on {count(int(cold_player['b2b_n']))} nights "
+                f"after playing the day before, and {rate(cold_player['rest_ts'])} on {count(int(cold_player['rest_n']))} games "
+                f"with a day off. The minutes were {points(cold_player['b2b_min'])} and {points(cold_player['rest_min'])}."
+            ),
+            hot_claim=(
+                f"{hot_player['name']} shot {rate(hot_player['b2b_ts'])} on {count(int(hot_player['b2b_n']))} nights "
+                f"after playing the day before, and {rate(hot_player['rest_ts'])} on {count(int(hot_player['rest_n']))} games "
+                f"with a day off. The minutes were {points(hot_player['b2b_min'])} and {points(hot_player['rest_min'])}."
+            ),
+            cold_title="Widest drops on a second night",
+            hot_title="Widest gains on a second night",
+            cold_fig=cast_figure(cold_players, worst=True),
+            hot_fig=cast_figure(hot_players, worst=False),
+            caption=(
+                f"Ice cold is the {ENDS} widest drops. Hot is the {ENDS} widest gains. "
+                "Red is a night after he played. Gold is a day between his games. "
+                "A player needs 30 second nights and 50 games with one day off."
+            ),
         )
 
     section("The count")
