@@ -143,6 +143,70 @@ def nights_figure(table: pandas.DataFrame) -> go.Figure:
     return figure
 
 
+def win_figure(table: pandas.DataFrame) -> go.Figure:
+    colors = [REST_COLORS.get(label, GOLD) for label in table["label"]]
+    figure = go.Figure(
+        go.Bar(
+            x=table["label"],
+            y=table["win_pct"],
+            marker_color=colors,
+            text=[rate(value) for value in table["win_pct"]],
+            textposition="outside",
+            textfont=dict(color=CREAM, family="Barlow, sans-serif", size=13),
+            cliponaxis=False,
+            customdata=table.loc[:, ["games", "margin", "ts"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{x}</b><br>Win rate: %{y:.1%}<br>Games: %{customdata[0]:,}<br>"
+                "Margin: %{customdata[1]:+.1f}<br>True shooting: %{customdata[2]:.1%}<extra></extra>"
+            ),
+        )
+    )
+    low = float(table["win_pct"].min()) - 0.04
+    high = float(table["win_pct"].max()) + 0.05
+    figure.update_layout(**chart_layout(420), xaxis=dict(tickfont=dict(color=INK), title=None), yaxis=axis())
+    figure.update_yaxes(tickformat=".0%", range=[low, high])
+    return figure
+
+
+def position_figure(table: pandas.DataFrame) -> go.Figure:
+    figure = go.Figure()
+    figure.add_trace(go.Bar(x=table["label"], y=table["b2b_ts"], name="Back-to-back", marker_color=RED))
+    figure.add_trace(go.Bar(x=table["label"], y=table["rest_ts"], name="One day off", marker_color=GOLD))
+    values = pandas.concat([table["b2b_ts"], table["rest_ts"]])
+    figure.update_layout(**chart_layout(420), xaxis=dict(tickfont=dict(color=INK), title=None), yaxis=axis())
+    figure.update_yaxes(tickformat=".1%", range=[float(values.min()) - 0.012, float(values.max()) + 0.016])
+    return figure
+
+
+def club_rest_figure(club: pandas.DataFrame, league: pandas.DataFrame) -> go.Figure:
+    merged = league.loc[:, ["label", "ts"]].merge(club.loc[:, ["label", "ts", "games", "win_pct"]], on="label", how="left")
+    figure = go.Figure()
+    figure.add_trace(
+        go.Bar(
+            x=merged["label"],
+            y=merged["ts_y"],
+            name="Club",
+            marker_color=RED,
+            customdata=merged.loc[:, ["games", "win_pct"]].to_numpy(),
+            hovertemplate="%{x}<br>Club: %{y:.1%}<br>Games: %{customdata[0]:,.0f}<br>Wins: %{customdata[1]:.1%}<extra></extra>",
+        )
+    )
+    figure.add_trace(
+        go.Bar(
+            x=merged["label"],
+            y=merged["ts_x"],
+            name="League",
+            marker_color=GOLD,
+            hovertemplate="%{x}<br>League: %{y:.1%}<extra></extra>",
+        )
+    )
+    figure.update_layout(**chart_layout(420), xaxis=dict(tickfont=dict(color=INK), title=None), yaxis=axis())
+    values = pandas.concat([merged["ts_x"], merged["ts_y"]]).dropna()
+    if not values.empty:
+        figure.update_yaxes(tickformat=".1%", range=[float(values.min()) - 0.012, float(values.max()) + 0.016])
+    return figure
+
+
 def club_gap_figure(gaps: pandas.DataFrame, league_gap: float) -> go.Figure:
     frame = gaps.sort_values(["ts_gap", "team"], ascending=[False, True])
     figure = go.Figure(
@@ -363,7 +427,13 @@ def nba_page() -> None:
     both_tired = row_for(edge, "Both on a back-to-back")
     neither = row_for(edge, "Neither on a back-to-back")
     home_b2b = cross.loc[cross["label"].eq("Home, back-to-back")].iloc[0]
+    home_rest = cross.loc[cross["label"].eq("Home, rested")].iloc[0]
+    road_b2b = cross.loc[cross["label"].eq("Road, back-to-back")].iloc[0]
     road_rest = cross.loc[cross["label"].eq("Road, rested")].iloc[0]
+    by_win = gaps.sort_values(["win_gap", "team"])
+    low_win = by_win.iloc[0]
+    next_win = by_win.iloc[1]
+    high_win = by_win.iloc[-1]
     openers = int(schedule["REST_LABEL"].isna().sum())
     widest = by_season.sort_values("ts_gap").iloc[0]
     narrow = by_season.sort_values("ts_gap").iloc[-1]
@@ -383,6 +453,7 @@ def nba_page() -> None:
     cast = cases.loc[cases["name"].isin(CAST)].copy() if not cases.empty else cases
     age = nba.own_rest_contrast(players, "AGE_BAND", nba.AGE_ORDER) if not players.empty else pandas.DataFrame()
     roles = nba.own_rest_contrast(players, "ROLE", nba.ROLE_ORDER) if not players.empty else pandas.DataFrame()
+    position = nba.rest_contrast(players, "POSITION_GROUP", nba.POSITION_ORDER) if not players.empty else pandas.DataFrame()
     kennard = find_player(cases, "Luke Kennard")
 
     held_line = ""
@@ -415,20 +486,23 @@ def nba_page() -> None:
 
     section("The second night")
     claim(
-        f"On a back-to-back, teams shot {rate(second['ts'])} and were outscored by {abs(second['margin']):.1f} points, "
-        f"on {count(int(second['games']))} games. With one day off they shot {rate(one['ts'])} and finished "
-        f"{signed_points(one['margin'])} points."
+        f"Teams won {rate(second['win_pct'])} of back-to-backs and {rate(one['win_pct'])} with one day off. "
+        f"With three or more days off they won {rate(long_rest['win_pct'])}. "
+        f"True shooting moved from {rate(second['ts'])} to {rate(long_rest['ts'])} across that same span, "
+        f"on {count(int(second['games']))} back-to-backs and {count(int(long_rest['games']))} long layoffs."
     )
     chart_heading("True shooting by nights off")
     st.plotly_chart(nights_figure(rest), width="stretch", config=CHART)
     st.caption("The axis starts in the mid-50s so the half-point is visible. Every group is still in the high 50s.")
+    chart_heading("Wins by nights off")
+    st.plotly_chart(win_figure(rest), width="stretch", config=CHART)
+    st.caption("Same games as the chart above. The axis is tightened. A win rate of 50% is a .500 club.")
     walk(
         f"Points fell from {points(one['pts_per_game'])} to {points(second['pts_per_game'])}. "
         f"The opponent scored {points(second['opp_pts'])} instead of {points(one['opp_pts'])}, and the margin moved from "
         f"{signed_points(one['margin'])} to {signed_points(second['margin'])}. "
         f"Possessions were {points(second['pace'])} a game on the second night and {points(one['pace'])} with one day off. "
-        f"Offensive rating moved from {points(one['ortg'])} to {points(second['ortg'])} per 100 possessions. "
-        f"Wins were {rate(second['win_pct'])} on the second night and {rate(one['win_pct'])} with one day off."
+        f"Offensive rating moved from {points(one['ortg'])} to {points(second['ortg'])} per 100 possessions."
     )
     walk(
         f"Two days off shot {rate(two['ts'])}, in line with one day off, and won {rate(two['win_pct'])}. "
@@ -460,6 +534,11 @@ def nba_page() -> None:
         f"A home back-to-back shot {rate(home_b2b['ts'])}. A rested team on the road shot {rate(road_rest['ts'])}. "
         f"The building is about a point of true shooting. The second night, set against one day off, is half a point."
     )
+    walk(
+        f"A road back-to-back won {rate(road_b2b['win_pct'])} and was outscored by {abs(road_b2b['margin']):.1f} points, "
+        f"on {count(int(road_b2b['games']))} games. A rested home team won {rate(home_rest['win_pct'])} and finished "
+        f"{signed_points(home_rest['margin'])} points, on {count(int(home_rest['games']))} games."
+    )
 
     section("The clubs")
     claim(
@@ -475,12 +554,22 @@ def nba_page() -> None:
     walk(
         f"The Nets shot {rate(nets['b2b_ts'])} on those nights and {rate(nets['rest_ts'])} in their other games, "
         f"and they were outscored by {abs(nets['b2b_margin']):.1f} points, against {abs(nets['rest_margin']):.1f} in the other games. "
-        f"The win rate falls {abs(nets['win_gap']) * 100:.1f} points."
+        f"The win rate falls from {rate(nets['rest_win'])} to {rate(nets['b2b_win'])}."
     )
     walk(
         f"The LA Clippers are the next club down the chart, {count(int(clippers['b2b_games']))} back-to-backs. "
         f"They shot {rate(clippers['b2b_ts'])} on the second night and {rate(clippers['rest_ts'])} otherwise, "
-        f"and the margin moves from {signed_points(clippers['rest_margin'])} to {signed_points(clippers['b2b_margin'])}."
+        f"and the margin moves from {signed_points(clippers['rest_margin'])} to {signed_points(clippers['b2b_margin'])}. "
+        f"The win rate moves from {rate(clippers['rest_win'])} to {rate(clippers['b2b_win'])}."
+    )
+    walk(
+        f"Win rate and true shooting land on different clubs. "
+        f"The {low_win['name']} won {rate(low_win['b2b_win'])} of {count(int(low_win['b2b_games']))} back-to-backs "
+        f"and {rate(low_win['rest_win'])} of their other games. True shooting was {abs(low_win['ts_gap']) * 100:.1f} points lower, "
+        f"and the margin moved {signed_points(low_win['margin_gap'])}. "
+        f"The {next_win['name']} won {rate(next_win['b2b_win'])} of their back-to-backs and {rate(next_win['rest_win'])} otherwise. "
+        f"The {high_win['name']} won {rate(high_win['b2b_win'])} on the second night and {rate(high_win['rest_win'])} otherwise, "
+        f"with true shooting {abs(high_win['ts_gap']) * 100:.1f} points {'lower' if high_win['ts_gap'] < 0 else 'higher'}."
     )
     walk(
         f"The Detroit Pistons are at the other end. The second night shot {rate(pistons['b2b_ts'])} against "
@@ -493,6 +582,37 @@ def nba_page() -> None:
         f"{rate(lakers['rest_ts'])}. The margin moves {signed_points(lakers['margin_gap'])} points and the win rate "
         f"moves {lakers['win_gap'] * 100:+.1f} points."
     )
+
+    section("Position")
+    if position.empty:
+        walk("Roster positions are not on disk yet. Run cache_nba_data.py and this chart fills in.")
+    else:
+        named = {"Guard": "Guards", "Forward": "Forwards", "Center": "Centers"}
+        levels = ". ".join(
+            f"{named.get(row.label, row.label)} shot {rate(row.b2b_ts)} on a back-to-back and {rate(row.rest_ts)} with one day off"
+            for row in position.itertuples()
+        )
+        widest_position = abs(float(position["ts_gap"].min())) * 100
+        if widest_position < 1:
+            lead = "The second night moves true shooting by less than a point at every position."
+        else:
+            lead = f"The widest position gap is {widest_position:.1f} points of true shooting."
+        claim(f"{lead} {levels}.")
+        chart_heading("True shooting by position")
+        st.plotly_chart(position_figure(position), width="stretch", config=CHART)
+        st.caption(
+            "A team back-to-back against one day off. The axis is tightened. "
+            "The space inside a pair is the second night. The space between groups is the position."
+        )
+        centers = position.loc[position["label"].eq("Center")]
+        if not centers.empty:
+            center = centers.iloc[0]
+            walk(
+                f"Centers at home shot {rate(center['home_b2b_ts'])} on a back-to-back and {rate(center['home_rest_ts'])} "
+                f"with one day off. On the road they shot {rate(center['away_b2b_ts'])} and {rate(center['away_rest_ts'])}. "
+                f"The minutes stayed level: centers played {points(center['b2b_min'])} on the second night and "
+                f"{points(center['rest_min'])} with one day off."
+            )
 
     section("The players")
     if kennard is None:
@@ -512,6 +632,46 @@ def nba_page() -> None:
                 "These six are the cases in the text."
             )
         player_story(cases, age, roles)
+
+    section("One club")
+    walk("The charts above use the ends of the league. The picker sets one club beside the league line.")
+    club_names = gaps.sort_values("name")
+    choice = st.selectbox(
+        "Club",
+        club_names["name"].tolist(),
+        index=int(club_names["name"].tolist().index(nets["name"])) if nets["name"] in set(club_names["name"]) else 0,
+    )
+    season_choice = st.selectbox("Season for this club", ["All seasons", *list(reversed(seasons))])
+    club_games = played.loc[played["TEAM_NAME"].eq(choice)].copy()
+    if season_choice != "All seasons":
+        club_games = club_games.loc[club_games["SEASON"].eq(season_choice)]
+    club_rest = nba.summarize_labels(club_games, "REST_LABEL", nba.REST_ORDER)
+    league_for_club = rest if season_choice == "All seasons" else nba.summarize_labels(
+        played.loc[played["SEASON"].eq(season_choice)], "REST_LABEL", nba.REST_ORDER
+    )
+    if club_rest.empty:
+        st.caption("No games for that club in this season.")
+    else:
+        club_second = club_rest.loc[club_rest["label"].eq("Back-to-back")]
+        club_one = club_rest.loc[club_rest["label"].eq("1 day off")]
+        if not club_second.empty and not club_one.empty:
+            claim(
+                f"{choice} won {rate(club_second.iloc[0]['win_pct'])} of {count(int(club_second.iloc[0]['games']))} back-to-backs "
+                f"and {rate(club_one.iloc[0]['win_pct'])} of {count(int(club_one.iloc[0]['games']))} games with one day off. "
+                f"They shot {rate(club_second.iloc[0]['ts'])} and {rate(club_one.iloc[0]['ts'])}."
+            )
+        chart_heading(choice)
+        st.plotly_chart(club_rest_figure(club_rest, league_for_club), width="stretch", config=CHART)
+        st.caption("True shooting for this club against the league in the same window. The axis is tightened.")
+        club_home = nba.pooled(club_games.loc[club_games["SITE"].eq("Home")])
+        club_away = nba.pooled(club_games.loc[club_games["SITE"].eq("Away")])
+        if club_home and club_away and club_home.get("ts") is not None and club_away.get("ts") is not None:
+            walk(
+                f"At home, {choice} shot {rate(club_home['ts'])}, won {rate(club_home['win_pct'])}, "
+                f"and finished {signed_points(club_home['margin'])} points over {count(int(club_home['games']))} games. "
+                f"On the road, {rate(club_away['ts'])}, {rate(club_away['win_pct'])}, "
+                f"and {signed_points(club_away['margin'])} points over {count(int(club_away['games']))} games."
+            )
 
     section("The count")
     rest_table(rest)

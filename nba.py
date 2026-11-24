@@ -646,6 +646,8 @@ def team_gaps(frame: pandas.DataFrame) -> pandas.DataFrame:
                 "ts_gap": second["ts"] - rested["ts"],
                 "margin_gap": second["margin"] - rested["margin"],
                 "win_gap": second["win_pct"] - rested["win_pct"],
+                "b2b_win": second["win_pct"],
+                "rest_win": rested["win_pct"],
                 "b2b_margin": second["margin"],
                 "rest_margin": rested["margin"],
                 "home_ts": home.get("ts"),

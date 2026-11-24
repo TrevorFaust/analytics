@@ -50,7 +50,7 @@ The page is at http://localhost:8501/expected-contact. Month files sit in `data/
 
 ## Basketball
 
-The basketball page asks whether a back-to-back costs efficiency. It reads the team game log, then the player game log for a handful of named cases. A back-to-back is a game on the day after that club's previous game. For a player, a second night means he himself played the day before. True shooting pools every shot in the group. The first game of a season stays out of the rest charts. Home and road come from the matchup and show up in the text, without a chart of their own.
+The basketball page asks whether a back-to-back costs efficiency. The shot moves about a point. The win rate moves several points, and that is the chart the page leans on. It then names the clubs at the ends, the three positions, a few players, and a picker for one club. A back-to-back is a game on the day after that club's previous game. For a player, a second night means he himself played the day before. True shooting pools every shot in the group. The first game of a season stays out of the rest charts. Home and road come from the matchup and show up in the text, without a chart of their own.
 
 The cache starts at 2021-22. Regular season only. A season with fewer than 400 team-games stays on disk and out of the pools. Shot-zone files stay season totals, so they are not part of this story.
 
