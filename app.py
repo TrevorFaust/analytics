@@ -3554,7 +3554,7 @@ CATALOG = [
         "projects": [
             {
                 "title": "Do back-to-backs cost efficiency?",
-                "dek": "Win rate and true shooting on the second night, for clubs, positions, and a few players, since 2021-22.",
+                "dek": "Win rate and true shooting on the second night, then the clubs and players where the gap is wide, since 2021-22.",
                 "url_path": "nba-logs",
                 "render": nba_page,
             }

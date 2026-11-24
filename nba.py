@@ -289,9 +289,13 @@ def pooled(frame: pandas.DataFrame) -> dict:
     points = float(frame["PTS"].sum())
     fga = float(frame["FGA"].sum())
     fta = float(frame["FTA"].sum())
+    fg3a = float(frame["FG3A"].sum())
+    fg3m = float(frame["FG3M"].sum())
+    ftm = float(frame["FTM"].sum())
     possessions = float(frame["POSS"].sum())
     denom = float(frame["TS_DENOM"].sum())
     margin = float(frame["PLUS_MINUS"].sum())
+    twos = fga - fg3a
     return {
         "games": games,
         "pts_per_game": points / games,
@@ -299,8 +303,10 @@ def pooled(frame: pandas.DataFrame) -> dict:
         "margin": margin / games,
         "ts": points / denom if denom else None,
         "efg": float(frame["EFG_NUM"].sum()) / fga if fga else None,
-        "fg3": float(frame["FG3M"].sum()) / float(frame["FG3A"].sum()) if frame["FG3A"].sum() else None,
-        "three_rate": float(frame["FG3A"].sum()) / fga if fga else None,
+        "fg2": (float(frame["FGM"].sum()) - fg3m) / twos if twos else None,
+        "fg3": fg3m / fg3a if fg3a else None,
+        "ft": ftm / fta if fta else None,
+        "three_rate": fg3a / fga if fga else None,
         "ft_rate": fta / fga if fga else None,
         "ortg": 100 * points / possessions if possessions else None,
         "pace": possessions / games,

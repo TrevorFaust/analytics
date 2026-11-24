@@ -5,6 +5,7 @@ The counts come from the team and player game logs in data/nba.
 
 from __future__ import annotations
 
+import calendar
 import html
 
 import pandas
@@ -168,13 +169,45 @@ def win_figure(table: pandas.DataFrame) -> go.Figure:
     return figure
 
 
-def position_figure(table: pandas.DataFrame) -> go.Figure:
+def trip_figure(table: pandas.DataFrame) -> go.Figure:
     figure = go.Figure()
-    figure.add_trace(go.Bar(x=table["label"], y=table["b2b_ts"], name="Back-to-back", marker_color=RED))
-    figure.add_trace(go.Bar(x=table["label"], y=table["rest_ts"], name="One day off", marker_color=GOLD))
-    values = pandas.concat([table["b2b_ts"], table["rest_ts"]])
-    figure.update_layout(**chart_layout(420), xaxis=dict(tickfont=dict(color=INK), title=None), yaxis=axis())
-    figure.update_yaxes(tickformat=".1%", range=[float(values.min()) - 0.012, float(values.max()) + 0.016])
+    figure.add_trace(
+        go.Bar(
+            x=table["label"],
+            y=table["b2b_win"],
+            name="Back-to-back",
+            marker_color=RED,
+            text=[rate(value) for value in table["b2b_win"]],
+            textposition="outside",
+            textfont=dict(color=CREAM, family="Barlow, sans-serif", size=12),
+            cliponaxis=False,
+            customdata=table.loc[:, ["b2b_n", "b2b_margin", "b2b_ts"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{x}</b><br>Back-to-back win rate: %{y:.1%}<br>Games: %{customdata[0]:,}<br>"
+                "Margin: %{customdata[1]:+.1f}<br>True shooting: %{customdata[2]:.1%}<extra></extra>"
+            ),
+        )
+    )
+    figure.add_trace(
+        go.Bar(
+            x=table["label"],
+            y=table["one_win"],
+            name="One day off",
+            marker_color=GOLD,
+            text=[rate(value) for value in table["one_win"]],
+            textposition="outside",
+            textfont=dict(color=CREAM, family="Barlow, sans-serif", size=12),
+            cliponaxis=False,
+            customdata=table.loc[:, ["one_n", "one_margin", "one_ts"]].to_numpy(),
+            hovertemplate=(
+                "<b>%{x}</b><br>One day off win rate: %{y:.1%}<br>Games: %{customdata[0]:,}<br>"
+                "Margin: %{customdata[1]:+.1f}<br>True shooting: %{customdata[2]:.1%}<extra></extra>"
+            ),
+        )
+    )
+    values = pandas.concat([table["b2b_win"], table["one_win"]])
+    figure.update_layout(**chart_layout(460), xaxis=dict(tickfont=dict(color=INK), title=None), yaxis=axis())
+    figure.update_yaxes(tickformat=".0%", range=[float(values.min()) - 0.07, float(values.max()) + 0.09])
     return figure
 
 
@@ -406,6 +439,8 @@ def nba_page() -> None:
     held = nba.held_seasons(on_disk)
     if not held.empty:
         schedule = schedule.loc[schedule["SEASON"].isin(nba.mature_seasons(on_disk))].copy()
+    schedule = schedule.sort_values(["SEASON", "TEAM_ID", "GAME_DATE", "GAME_ID"])
+    schedule["PREV_SITE"] = schedule.groupby(["SEASON", "TEAM_ID"], sort=False)["SITE"].shift(1)
     played = nba.with_rest(schedule)
     if played.empty:
         missing_cache()
@@ -427,8 +462,6 @@ def nba_page() -> None:
     both_tired = row_for(edge, "Both on a back-to-back")
     neither = row_for(edge, "Neither on a back-to-back")
     home_b2b = cross.loc[cross["label"].eq("Home, back-to-back")].iloc[0]
-    home_rest = cross.loc[cross["label"].eq("Home, rested")].iloc[0]
-    road_b2b = cross.loc[cross["label"].eq("Road, back-to-back")].iloc[0]
     road_rest = cross.loc[cross["label"].eq("Road, rested")].iloc[0]
     by_win = gaps.sort_values(["win_gap", "team"])
     low_win = by_win.iloc[0]
@@ -455,6 +488,77 @@ def nba_page() -> None:
     roles = nba.own_rest_contrast(players, "ROLE", nba.ROLE_ORDER) if not players.empty else pandas.DataFrame()
     position = nba.rest_contrast(players, "POSITION_GROUP", nba.POSITION_ORDER) if not players.empty else pandas.DataFrame()
     kennard = find_player(cases, "Luke Kennard")
+
+    def trip_stats(previous: str, site: str, one_day: bool) -> dict:
+        mask = played["PREV_SITE"].eq(previous) & played["SITE"].eq(site)
+        if one_day:
+            mask = mask & played["REST_DAYS"].eq(1)
+        else:
+            mask = mask & played["IS_B2B"]
+        return nba.pooled(played.loc[mask])
+
+    trip_rows = []
+    for label, previous, site in (
+        ("Stayed home", "Home", "Home"),
+        ("Left home", "Home", "Away"),
+        ("Came home", "Away", "Home"),
+        ("Stayed on the road", "Away", "Away"),
+    ):
+        second_trip = trip_stats(previous, site, False)
+        one_trip = trip_stats(previous, site, True)
+        trip_rows.append(
+            {
+                "label": label,
+                "b2b_win": second_trip["win_pct"],
+                "one_win": one_trip["win_pct"],
+                "b2b_n": second_trip["games"],
+                "one_n": one_trip["games"],
+                "b2b_ts": second_trip["ts"],
+                "one_ts": one_trip["ts"],
+                "b2b_margin": second_trip["margin"],
+                "one_margin": one_trip["margin"],
+            }
+        )
+    trips = pandas.DataFrame(trip_rows)
+    stayed = trips.loc[trips["label"].eq("Stayed home")].iloc[0]
+    left = trips.loc[trips["label"].eq("Left home")].iloc[0]
+    came = trips.loc[trips["label"].eq("Came home")].iloc[0]
+    road_trip = trips.loc[trips["label"].eq("Stayed on the road")].iloc[0]
+    fresh_one = nba.pooled(played.loc[played["REST_DAYS"].eq(1) & played["OPP_B2B"].eq(False)])
+    records = schedule.groupby(["SEASON", "TEAM_ABBREVIATION"], as_index=False).agg(
+        opp_win=("WL", lambda series: float((series == "W").mean()))
+    )
+    records = records.rename(columns={"TEAM_ABBREVIATION": "OPPONENT"})
+    faced = played.merge(records, on=["SEASON", "OPPONENT"], how="left")
+    b2b_opp_win = float(faced.loc[faced["IS_B2B"], "opp_win"].mean())
+    one_opp_win = float(faced.loc[faced["REST_DAYS"].eq(1), "opp_win"].mean())
+    month_rows = []
+    for month, group in played.groupby(played["GAME_DATE"].dt.month):
+        month_b2b = nba.pooled(group.loc[group["IS_B2B"]])
+        month_one = nba.pooled(group.loc[group["REST_DAYS"].eq(1)])
+        if not month_b2b or not month_one or month_b2b["games"] < 100:
+            continue
+        month_rows.append(
+            {
+                "month": calendar.month_name[int(month)],
+                "b2b": month_b2b,
+                "one": month_one,
+                "ts_gap": month_b2b["ts"] - month_one["ts"],
+                "win_gap": month_b2b["win_pct"] - month_one["win_pct"],
+            }
+        )
+    quiet = min(month_rows, key=lambda row: abs(row["ts_gap"]))
+    harsh = min(month_rows, key=lambda row: row["win_gap"])
+
+    def second_night_mix(name: str) -> tuple[float, float]:
+        club = played.loc[played["TEAM_NAME"].eq(name) & played["IS_B2B"]]
+        return float(club["SITE"].eq("Away").mean()), float(club["EDGE"].eq("You on a back-to-back").mean())
+
+    low_road, low_fresh = second_night_mix(low_win["name"])
+    nets_road, nets_fresh = second_night_mix(nets["name"])
+    league_b2b = played.loc[played["IS_B2B"]]
+    league_road = float(league_b2b["SITE"].eq("Away").mean())
+    league_fresh = float(league_b2b["EDGE"].eq("You on a back-to-back").mean())
 
     held_line = ""
     if not held.empty:
@@ -510,34 +614,78 @@ def nba_page() -> None:
         f"That bucket holds the All-Star break and the other long layoffs."
     )
     walk(
-        f"Three-point attempts were {rate(second['three_rate'])} of field goals on a back-to-back and "
-        f"{rate(one['three_rate'])} with one day off. Turnovers were {rate(second['tov_rate'])} of possessions on a back-to-back "
-        f"and {rate(one['tov_rate'])} with one day off. Free throws were {rate(second['ft_rate'])} of field-goal attempts and "
-        f"{rate(one['ft_rate'])}."
-    )
-    walk(
-        f"{count(int(tired_only['games']))} of the {count(int(second['games']))} back-to-backs faced a rested opponent. "
-        f"In those games the tired club shot {rate(tired_only['ts'])}, was outscored by {abs(tired_only['margin']):.1f} points, "
-        f"and won {rate(tired_only['win_pct'])}. "
-        f"When both clubs were on a back-to-back, true shooting was {rate(both_tired['ts'])} and the margin was even, "
-        f"on {count(int(both_tired['games']))} games. "
-        f"When neither club was, true shooting was {rate(neither['ts'])} and the margin was even, "
-        f"on {count(int(neither['games']))} games. "
-        f"The second night looks ordinary when the opponent is on one too."
+        f"Two-point field goals fell from {rate(one['fg2'])} to {rate(second['fg2'])}. "
+        f"Threes went from {rate(one['fg3'])} to {rate(second['fg3'])}, and three-point attempts stayed at "
+        f"{rate(second['three_rate'])} of field goals against {rate(one['three_rate'])}. "
+        f"Free throws were {rate(second['ft'])} on a back-to-back and {rate(one['ft'])} with one day off. "
+        f"Turnovers were {rate(second['tov_rate'])} of possessions and {rate(one['tov_rate'])}."
     )
     walk(
         f"The gap is in each of the {len(by_season)} seasons, from {narrow['ts_gap'] * 100:.1f} points in {narrow['season']} "
-        f"to {widest['ts_gap'] * 100:.1f} points in {widest['season']}."
+        f"to {widest['ts_gap'] * 100:.1f} points in {widest['season']}. "
+        f"{quiet['month']} is the quiet month for the shot: back-to-backs shot {rate(quiet['b2b']['ts'])} and one day off shot "
+        f"{rate(quiet['one']['ts'])}. {harsh['month']} is the wide month for wins, {rate(harsh['b2b']['win_pct'])} against "
+        f"{rate(harsh['one']['win_pct'])} with one day off."
     )
     walk(
         f"Home teams shot {rate(home['ts'])} and won {rate(home['win_pct'])}. "
         f"A home back-to-back shot {rate(home_b2b['ts'])}. A rested team on the road shot {rate(road_rest['ts'])}. "
         f"The building is about a point of true shooting. The second night, set against one day off, is half a point."
     )
+    if not position.empty:
+        named = {"Guard": "Guards", "Forward": "Forwards", "Center": "Centers"}
+        levels = ". ".join(
+            f"{named.get(row.label, row.label)} shot {rate(row.b2b_ts)} on a back-to-back and {rate(row.rest_ts)} with one day off"
+            for row in position.itertuples()
+        )
+        extra = ""
+        if abs(float(position["ts_gap"].min())) < 0.01 and abs(float(position["ts_gap"].max())) < 0.01:
+            extra = " The step at each spot is under a point."
+        guards = position.loc[position["label"].eq("Guard")]
+        centers = position.loc[position["label"].eq("Center")]
+        if (
+            not guards.empty
+            and not centers.empty
+            and centers.iloc[0]["b2b_ts"] > guards.iloc[0]["b2b_ts"]
+            and centers.iloc[0]["rest_ts"] > guards.iloc[0]["rest_ts"]
+        ):
+            extra += " Centers sit higher on both nights."
+        walk(f"{levels}.{extra}")
+
+    section("The other club, and the trip")
+    claim(
+        f"A back-to-back against a rested opponent won {rate(tired_only['win_pct'])} and shot {rate(tired_only['ts'])}, "
+        f"on {count(int(tired_only['games']))} games. "
+        f"A team with one day off, also against a rested opponent, won {rate(fresh_one['win_pct'])} and shot {rate(fresh_one['ts'])}, "
+        f"on {count(int(fresh_one['games']))} games. "
+        f"The tired club scored {points(tired_only['pts_per_game'])} and allowed {points(tired_only['opp_pts'])}. "
+        f"The one-day club scored {points(fresh_one['pts_per_game'])} and allowed {points(fresh_one['opp_pts'])}."
+    )
+    chart_heading("Wins by the trip into the game")
+    st.plotly_chart(trip_figure(trips), width="stretch", config=CHART)
+    st.caption(
+        "A back-to-back against the same kind of trip with one day off. "
+        "Stayed home means both games were at home. Left home means a home game, then a road game the next night."
+    )
     walk(
-        f"A road back-to-back won {rate(road_b2b['win_pct'])} and was outscored by {abs(road_b2b['margin']):.1f} points, "
-        f"on {count(int(road_b2b['games']))} games. A rested home team won {rate(home_rest['win_pct'])} and finished "
-        f"{signed_points(home_rest['margin'])} points, on {count(int(home_rest['games']))} games."
+        f"Leaving home the next night won {rate(left['b2b_win'])} of {count(int(left['b2b_n']))} games, "
+        f"against {rate(left['one_win'])} for that trip with a day in between. "
+        f"Staying home won {rate(stayed['b2b_win'])} of {count(int(stayed['b2b_n']))} second nights, "
+        f"against {rate(stayed['one_win'])} for a home game with one day off. "
+        f"Coming home the next night, true shooting was {rate(came['b2b_ts'])} against {rate(came['one_ts'])}, "
+        f"and the win rate was {rate(came['b2b_win'])} against {rate(came['one_win'])}. "
+        f"The second city of a road trip won {rate(road_trip['b2b_win'])}, against {rate(road_trip['one_win'])} with a day off."
+    )
+    walk(
+        f"When both clubs were on a back-to-back, true shooting was {rate(both_tired['ts'])} and the games averaged "
+        f"{points(both_tired['pts_per_game'])} points, on {count(int(both_tired['games']))} games. "
+        f"When neither club was, true shooting was {rate(neither['ts'])} and the games averaged "
+        f"{points(neither['pts_per_game'])} points."
+    )
+    walk(
+        f"Second-night opponents won {rate(b2b_opp_win)} of their games that season. "
+        f"Opponents of a team with one day off won {rate(one_opp_win)}. "
+        f"The box score has the date, the building, and the shots. It has no injury report and no miles between cities."
     )
 
     section("The clubs")
@@ -572,6 +720,12 @@ def nba_page() -> None:
         f"with true shooting {abs(high_win['ts_gap']) * 100:.1f} points {'lower' if high_win['ts_gap'] < 0 else 'higher'}."
     )
     walk(
+        f"Of the {low_win['name']}'s {count(int(low_win['b2b_games']))} second nights, {rate(low_road)} were on the road "
+        f"and {rate(low_fresh)} faced a rested opponent. Of the Nets' {count(int(nets['b2b_games']))} second nights, "
+        f"{rate(nets_road)} were on the road and {rate(nets_fresh)} faced a rested opponent. Across the league, "
+        f"{rate(league_road)} of back-to-backs are on the road and {rate(league_fresh)} face a rested opponent."
+    )
+    walk(
         f"The Detroit Pistons are at the other end. The second night shot {rate(pistons['b2b_ts'])} against "
         f"{rate(pistons['rest_ts'])} in their other games. The margin improved by {pistons['margin_gap']:.1f} points "
         f"and the win rate moved {pistons['win_gap'] * 100:+.1f} points. They were still outscored, by "
@@ -582,37 +736,6 @@ def nba_page() -> None:
         f"{rate(lakers['rest_ts'])}. The margin moves {signed_points(lakers['margin_gap'])} points and the win rate "
         f"moves {lakers['win_gap'] * 100:+.1f} points."
     )
-
-    section("Position")
-    if position.empty:
-        walk("Roster positions are not on disk yet. Run cache_nba_data.py and this chart fills in.")
-    else:
-        named = {"Guard": "Guards", "Forward": "Forwards", "Center": "Centers"}
-        levels = ". ".join(
-            f"{named.get(row.label, row.label)} shot {rate(row.b2b_ts)} on a back-to-back and {rate(row.rest_ts)} with one day off"
-            for row in position.itertuples()
-        )
-        widest_position = abs(float(position["ts_gap"].min())) * 100
-        if widest_position < 1:
-            lead = "The second night moves true shooting by less than a point at every position."
-        else:
-            lead = f"The widest position gap is {widest_position:.1f} points of true shooting."
-        claim(f"{lead} {levels}.")
-        chart_heading("True shooting by position")
-        st.plotly_chart(position_figure(position), width="stretch", config=CHART)
-        st.caption(
-            "A team back-to-back against one day off. The axis is tightened. "
-            "The space inside a pair is the second night. The space between groups is the position."
-        )
-        centers = position.loc[position["label"].eq("Center")]
-        if not centers.empty:
-            center = centers.iloc[0]
-            walk(
-                f"Centers at home shot {rate(center['home_b2b_ts'])} on a back-to-back and {rate(center['home_rest_ts'])} "
-                f"with one day off. On the road they shot {rate(center['away_b2b_ts'])} and {rate(center['away_rest_ts'])}. "
-                f"The minutes stayed level: centers played {points(center['b2b_min'])} on the second night and "
-                f"{points(center['rest_min'])} with one day off."
-            )
 
     section("The players")
     if kennard is None:
