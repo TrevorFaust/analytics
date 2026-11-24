@@ -302,6 +302,7 @@ def pooled(frame: pandas.DataFrame) -> dict:
         "opp_pts": (points - margin) / games,
         "margin": margin / games,
         "ts": points / denom if denom else None,
+        "fg": float(frame["FGM"].sum()) / fga if fga else None,
         "efg": float(frame["EFG_NUM"].sum()) / fga if fga else None,
         "fg2": (float(frame["FGM"].sum()) - fg3m) / twos if twos else None,
         "fg3": fg3m / fg3a if fg3a else None,

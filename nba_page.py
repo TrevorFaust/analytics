@@ -790,7 +790,6 @@ def nba_page() -> None:
     low_win = by_win.iloc[0]
     next_win = by_win.iloc[1]
     high_win = by_win.iloc[-1]
-    openers = int(schedule["REST_LABEL"].isna().sum())
     widest = by_season.sort_values("ts_gap").iloc[0]
     narrow = by_season.sort_values("ts_gap").iloc[-1]
     other = nba.pooled(played.loc[~played["IS_B2B"]])
@@ -875,13 +874,6 @@ def nba_page() -> None:
     league_road = float(league_b2b["SITE"].eq("Away").mean())
     league_fresh = float(league_b2b["EDGE"].eq("You on a back-to-back").mean())
 
-    held_line = ""
-    if not held.empty:
-        held_line = " " + " ".join(
-            f"{season} has {count(int(games))} team-games on disk and stays out until the season is longer."
-            for season, games in held.items()
-        )
-
     st.markdown(
         f"""
         <header class="mast">
@@ -900,12 +892,6 @@ def nba_page() -> None:
         "The question is whether the second night takes that shot away, for the club and for the players who had to play it.",
         "deck",
     )
-    walk(
-        f"The file runs from {seasons[0]} through {seasons[-1]}, {count(int(played.shape[0]))} team-games with a previous game to measure. "
-        f"Regular season only. The first game of each season stays out, {count(openers)} team-games. "
-        f"Home and road come from the matchup.{held_line}",
-        key="nba_file",
-    )
 
     section("The second night")
     claim(
@@ -918,6 +904,14 @@ def nba_page() -> None:
     chart_heading("True shooting by nights off")
     st.plotly_chart(nights_figure(rest), width="stretch", config=CHART)
     st.caption("The axis starts in the mid-50s so the half-point is visible. Every group is still in the high 50s.")
+    walk(
+        f"Field goal percentage is made field goals divided by attempts. A layup and a three each count as one make, and free throws stay out of it. "
+        f"True shooting counts the points those shots produced: points divided by twice the field-goal attempts plus 0.44 free throws. "
+        f"The made three is worth the extra point, and the free throws count. "
+        f"On a back-to-back, clubs made {rate(second['fg'])} of their field goals and true shooting was {rate(second['ts'])}. "
+        f"With one day off they made {rate(one['fg'])}, and true shooting was {rate(one['ts'])}.",
+        key="nba_true_shooting",
+    )
     chart_heading("Wins by nights off")
     st.plotly_chart(win_figure(rest), width="stretch", config=CHART)
     st.caption("Same games as the chart above. The axis is tightened. A win rate of 50% is a .500 club.")

@@ -660,6 +660,9 @@ def story_html(text: str) -> str:
 
 def story_paragraph(key: str, default: str, css_class: str) -> None:
     """Show one story paragraph. On localhost, Edit underneath opens that paragraph only."""
+    saved = load_story().get(key, "")
+    if saved.strip().lower() in {"delete", "deleted"}:
+        return
     state_key = f"story_edit_{key}"
     editing = personal_copy() and st.session_state.get("story_editing") == key
     if editing:
