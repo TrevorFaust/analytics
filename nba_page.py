@@ -901,6 +901,13 @@ def nba_page() -> None:
         f"on {count(int(second['games']))} back-to-backs and {count(int(long_rest['games']))} long layoffs.",
         key="nba_second_claim",
     )
+    walk(
+        f"A back-to-back shot {rate(second['ts'])} across {count(int(second['games']))} games. "
+        f"One day off shot {rate(one['ts'])} across {count(int(one['games']))}. "
+        f"Two days off shot {rate(two['ts'])} across {count(int(two['games']))}. "
+        f"Three or more days off shot {rate(long_rest['ts'])} across {count(int(long_rest['games']))}.",
+        key="nba_nights",
+    )
     chart_heading("True shooting by nights off")
     st.plotly_chart(nights_figure(rest), width="stretch", config=CHART)
     st.caption("The axis starts in the mid-50s so the half-point is visible. Every group is still in the high 50s.")
