@@ -628,7 +628,45 @@ def load_story() -> dict[str, str]:
 
 
 def save_story(blocks: dict[str, str]) -> None:
-    STORY_PATH.write_text(json.dumps(blocks, indent=2), encoding="utf-8")
+    STORY_PATH.write_text(json.dumps(blocks, indent=2) + "\n", encoding="utf-8")
+
+
+def load_story_history() -> dict[str, list[str]]:
+    path = STORY_PATH.with_name("story_history.json")
+    if not path.exists():
+        return {}
+    try:
+        saved = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(saved, dict):
+        return {}
+    history: dict[str, list[str]] = {}
+    for key, versions in saved.items():
+        if isinstance(versions, list):
+            history[str(key)] = [str(item) for item in versions if str(item).strip()]
+    return history
+
+
+def save_story_history(history: dict[str, list[str]]) -> None:
+    STORY_PATH.with_name("story_history.json").write_text(
+        json.dumps(history, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def archive_story(key: str, text: str) -> None:
+    """Keep the wording a save is about to replace."""
+    text = text.strip()
+    if not text:
+        return
+    history = load_story_history()
+    versions = history.get(key, [])
+    if versions and versions[-1] == text:
+        return
+    versions.append(text)
+    history[key] = versions[-8:]
+    save_story_history(history)
 
 
 def personal_copy() -> bool:
@@ -662,6 +700,7 @@ def story_paragraph(key: str, default: str, css_class: str) -> None:
     """Show one story paragraph. On localhost, Edit underneath opens that paragraph only."""
     saved = load_story().get(key, "")
     if saved.strip().lower() in {"delete", "deleted"}:
+        _story_previous(key, default)
         return
     state_key = f"story_edit_{key}"
     editing = personal_copy() and st.session_state.get("story_editing") == key
@@ -680,6 +719,9 @@ def story_paragraph(key: str, default: str, css_class: str) -> None:
                     do_cancel = st.form_submit_button("Cancel")
         if do_save:
             text = st.session_state.get(state_key, "").strip()
+            current = story_line(key, default).strip()
+            if current and current != text:
+                archive_story(key, current)
             saved = load_story()
             if text and text != default.strip():
                 saved[key] = text
@@ -701,11 +743,51 @@ def story_paragraph(key: str, default: str, css_class: str) -> None:
     )
     if not personal_copy():
         return
-    _left, mid, _right = st.columns([1, 0.28, 1])
+    _story_previous(key, default, with_edit=True)
+
+
+def _story_previous(key: str, default: str, *, with_edit: bool = False) -> None:
+    """On localhost, step back to the wording the last save replaced."""
+    versions = load_story_history().get(key, [])
+    if not personal_copy():
+        return
+    if with_edit and not versions:
+        _left, mid, _right = st.columns([1, 0.28, 1])
+        with mid:
+            if st.button("Edit", key=f"story_edit_btn_{key}"):
+                st.session_state["story_editing"] = key
+                st.rerun()
+        return
+    if not with_edit and not versions:
+        return
+    _left, mid, _right = st.columns([1, 0.55, 1])
     with mid:
-        if st.button("Edit", key=f"story_edit_btn_{key}"):
-            st.session_state["story_editing"] = key
-            st.rerun()
+        edit_col, prev_col = st.columns(2)
+        if with_edit:
+            with edit_col:
+                if st.button("Edit", key=f"story_edit_btn_{key}"):
+                    st.session_state["story_editing"] = key
+                    st.rerun()
+        with prev_col:
+            if versions and st.button("Previous version", key=f"story_prev_{key}"):
+                history = load_story_history()
+                stack = history.get(key, [])
+                prior = stack.pop()
+                current = story_line(key, default).strip()
+                if current and current != prior:
+                    stack.append(current)
+                if stack:
+                    history[key] = stack[-8:]
+                else:
+                    history.pop(key, None)
+                save_story_history(history)
+                saved = load_story()
+                if prior.strip() == default.strip():
+                    saved.pop(key, None)
+                else:
+                    saved[key] = prior
+                save_story(saved)
+                st.rerun()
 
 
 def save_note(title: str, body: str) -> None:

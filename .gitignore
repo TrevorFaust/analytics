@@ -3,5 +3,6 @@ data/cache/
 data/baseball/parts/
 data/baseball/zone_parts/
 notes.json
+story_history.json
 __pycache__/
 *.pyc
